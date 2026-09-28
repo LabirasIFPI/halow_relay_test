@@ -1199,22 +1199,31 @@ int main(int argc, char *argv[]) {
 	RngSeedManager::SetSeed(config.seed);
 	RngSeedManager::SetRun(config.seed);
 
-	wifiStaNode.Create(config.Nsta);
+	NodeContainer wifiRelayNode;
+	NodeContainer wifiLeafNode;
+
+	wifiRelayNode.Create(1);
+	wifiLeafNode.Create(16);
 	wifiApNode.Create(1);
+
+	wifiStaNode.Add(wifiRelayNode);
+	wifiStaNode.Add(wifiLeafNode);
 
 	YansWifiChannelHelper channelBuilder = YansWifiChannelHelper();
 	channelBuilder.AddPropagationLoss("ns3::LogDistancePropagationLossModel",
 			"Exponent", DoubleValue(3.76), "ReferenceLoss", DoubleValue(8.0),
 			"ReferenceDistance", DoubleValue(1.0));
-	channelBuilder.SetPropagationDelay(
-			"ns3::ConstantSpeedPropagationDelayModel");
-	Ptr<YansWifiChannel> channel = channelBuilder.Create();
-	channel->TraceConnectWithoutContext("Transmission",
-			MakeCallback(&onChannelTransmission)); //TODO
+	channelBuilder.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
+
+	Ptr<YansWifiChannel> channel1 = channelBuilder.Create(); // salto 1: AP raiz <-> STA do relay
+	Ptr<YansWifiChannel> channel2 = channelBuilder.Create(); // salto 2: AP do relay <-> leaves
+
+	channel1->TraceConnectWithoutContext("Transmission", MakeCallback(&onChannelTransmission));
+	channel2->TraceConnectWithoutContext("Transmission", MakeCallback(&onChannelTransmission));
 
 	YansWifiPhyHelper phy = YansWifiPhyHelper::Default();
 	phy.SetErrorRateModel("ns3::YansErrorRateModel");
-	phy.SetChannel(channel);
+	phy.SetChannel(channel1);
 	phy.Set("ShortGuardEnabled", BooleanValue(false));
 	phy.Set("ChannelWidth", UintegerValue(getBandwidth(config.DataMode))); // changed
 	phy.Set("EnergyDetectionThreshold", DoubleValue(-110.0));
@@ -1233,6 +1242,7 @@ int main(int argc, char *argv[]) {
 	S1gWifiMacHelper mac = S1gWifiMacHelper::Default();
 
 	Ssid ssid = Ssid("ns380211ah");
+	Ssid relaySsid = Ssid("ns380211ah-relay");
 	StringValue DataRate;
 	DataRate = StringValue(getWifiMode(config.DataMode)); // changed
 
@@ -1243,8 +1253,19 @@ int main(int argc, char *argv[]) {
 	mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid), "ActiveProbing",
 			BooleanValue(false));
 
+	NetDeviceContainer staRelayDevice;
+	staRelayDevice = wifi.Install(phy, mac, wifiRelayNode);
+
+	mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(relaySsid), "ActiveProbing",
+			BooleanValue(false));
+	
+	phy.SetChannel(channel2);
+	NetDeviceContainer leafDevice;
+	leafDevice = wifi.Install(phy, mac, wifiLeafNode);
+
 	NetDeviceContainer staDevice;
-	staDevice = wifi.Install(phy, mac, wifiStaNode);
+	staDevice.Add(staRelayDevice);
+	staDevice.Add(leafDevice);
 
 	mac.SetType ("ns3::ApWifiMac",
 	                 "Ssid", SsidValue (ssid),
@@ -1262,7 +1283,21 @@ int main(int argc, char *argv[]) {
 	phy.Set("TxPowerStart", DoubleValue(30.0));
 	phy.Set("RxNoiseFigure", DoubleValue(6.8));
 
+	phy.SetChannel(channel1);
 	apDevice = wifi.Install(phy, mac, wifiApNode);
+
+	mac.SetType ("ns3::ApWifiMac",
+	                 "Ssid", SsidValue (relaySsid),
+	                 "BeaconInterval", TimeValue (MicroSeconds(config.BeaconInterval)),
+	                 "NRawStations", UintegerValue (config.NRawSta),
+	                 "RPSsetup", RPSVectorValue (config.rps),
+	                 "PageSliceSet", pageSliceValue (config.pageS),
+	                 "TIMSet", TIMValue (config.tim)
+	               );
+
+	phy.SetChannel(channel2);
+	NetDeviceContainer apRelayDevice;
+	apRelayDevice = wifi.Install(phy, mac, wifiRelayNode);
 
 	Config::Set(
 			"/NodeList/*/DeviceList/0/$ns3::WifiNetDevice/Mac/$ns3::RegularWifiMac/BE_EdcaTxopN/Queue/MaxPacketNumber",
@@ -1306,7 +1341,18 @@ int main(int argc, char *argv[]) {
 			StringValue(std::to_string(xpos)), "Y",
 			StringValue(std::to_string(ypos)), "rho", StringValue(config.rho));
 	mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-	mobility.Install(wifiStaNode);
+	mobility.Install(wifiRelayNode);
+
+	Ptr<MobilityModel> relayMob = wifiRelayNode.Get(0)->GetObject<MobilityModel>();
+	Vector relayPos = relayMob->GetPosition();
+
+	MobilityHelper staMobility;
+	staMobility.SetPositionAllocator("ns3::UniformDiscPositionAllocator",
+									"X", DoubleValue(relayPos.x),
+									"Y", DoubleValue(relayPos.y),
+									"rho", DoubleValue(20.0));  // raio em metros
+	staMobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+	staMobility.Install(wifiLeafNode);
 
 	MobilityHelper mobilityAp;
 	Ptr<ListPositionAllocator> positionAlloc = CreateObject<
@@ -1359,14 +1405,33 @@ int main(int argc, char *argv[]) {
 
 	Ipv4AddressHelper address;
 
-	address.SetBase("192.168.0.0", "255.255.0.0");
+	address.SetBase("192.168.1.0", "255.255.255.0");
 
-	staNodeInterface = address.Assign(staDevice);
+	staNodeInterface = address.Assign(staRelayDevice);
 	apNodeInterface = address.Assign(apDevice);
+
+	address.SetBase("192.168.2.0", "255.255.255.0");
+	Ipv4InterfaceContainer relayApInterface = address.Assign(apRelayDevice);
+	Ipv4InterfaceContainer staLeafInterface = address.Assign(leafDevice);
+
+	Ipv4StaticRoutingHelper srh;
+
+	// leaves: tudo via AP do relay (interface 1)
+	for (uint32_t i = 0; i < wifiLeafNode.GetN(); i++) {
+		Ptr<Ipv4StaticRouting> r = srh.GetStaticRouting(wifiLeafNode.Get(i)->GetObject<Ipv4>());
+		r->SetDefaultRoute(relayApInterface.GetAddress(0), 1);
+	}
+	// relay: o que não é 192.168.2.0/24 sobe pelo AP raiz (interface 1 = STA)
+	srh.GetStaticRouting(wifiRelayNode.Get(0)->GetObject<Ipv4>())
+	->SetDefaultRoute(apNodeInterface.GetAddress(0), 1);
+	// AP raiz: rede das leaves via relay
+	srh.GetStaticRouting(wifiApNode.Get(0)->GetObject<Ipv4>())
+	->AddNetworkRouteTo(Ipv4Address("192.168.2.0"), Ipv4Mask("255.255.255.0"),
+						staNodeInterface.GetAddress(0), 1);
 
 	//trace association
 	std::cout << "Configuring trace sources..." << std::endl;
-	for (uint16_t kk = 0; kk < config.Nsta; kk++) {
+	for (uint16_t kk = 0; kk < wifiStaNode.GetN(); kk++) {
 		std::ostringstream STA;
 		STA << kk;
 		std::string strSTA = STA.str();
@@ -1385,7 +1450,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	std::cout << "Populating routing tables..." << std::endl;
-	Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+	// Ipv4GlobalRoutingHelper::PopulateRoutingTables();
 	std::cout << "Populating ARP cache..." << std::endl;
 	PopulateArpCache();
 
@@ -1394,11 +1459,11 @@ int main(int argc, char *argv[]) {
 	configureNodes(wifiStaNode, staDevice);
 
 	Config::Connect(
-			"/NodeList/" + std::to_string(config.Nsta)
+			"/NodeList/" + std::to_string(wifiStaNode.GetN())
 					+ "/DeviceList/0/$ns3::WifiNetDevice/Phy/PhyRxDropWithReason",
 			MakeCallback(&OnAPPhyRxDrop));
 	Config::Connect(
-			"/NodeList/" + std::to_string(config.Nsta)
+			"/NodeList/" + std::to_string(wifiStaNode.GetN())
 					+ "/DeviceList/0/$ns3::WifiNetDevice/Mac/$ns3::ApWifiMac/PacketToTransmitReceivedFromUpperLayer",
 			MakeCallback(&OnAPPacketToTransmitReceived));
 
@@ -1407,7 +1472,7 @@ int main(int argc, char *argv[]) {
 	Vector apposition = mobility1->GetPosition();
 	if (OutputPosition) {
 		uint32_t i = 0;
-		while (i < config.Nsta) {
+		while (i < wifiStaNode.GetN()) {
 			Ptr<MobilityModel> mobility = wifiStaNode.Get(i)->GetObject<
 					MobilityModel>();
 			Vector position = mobility->GetPosition();
@@ -1423,7 +1488,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	/*Print of the state of the stations*/
-	for (uint32_t i = 0; i < config.Nsta; i++) {
+	for (uint32_t i = 0; i < wifiStaNode.GetN(); i++) {
 		std::ostringstream STA;
 		STA << i;
 		std::string strSTA = STA.str();
@@ -1443,7 +1508,7 @@ int main(int argc, char *argv[]) {
 				eventManager.onRawConfig(i, j,
 						config.rps.rpsset[i]->GetRawAssigmentObj(j));
 
-	for (uint32_t i = 0; i < config.Nsta; i++)
+	for (uint32_t i = 0; i < wifiStaNode.GetN(); i++)
 		eventManager.onSTANodeCreated(*nodes[i]);
 
 	eventManager.onAPNodeCreated(apposition.x, apposition.y);
@@ -1456,7 +1521,7 @@ int main(int argc, char *argv[]) {
 
 	// Visualizer throughput
 	int pay = 0, totalSuccessfulPackets = 0, totalSentPackets = 0, totalPacketsEchoed = 0;
-	for (int i = 0; i < config.Nsta; i++)
+	for (int i = 0; i < wifiStaNode.GetN(); i++)
 	{
 		totalSuccessfulPackets += stats.get(i).NumberOfSuccessfulPackets;
 		totalSentPackets += stats.get(i).NumberOfSentPackets;
@@ -1518,7 +1583,7 @@ int main(int argc, char *argv[]) {
     int i = 0;
     string spazio = ",";
     
-    while (i < config.Nsta) {
+    while (i < wifiStaNode.GetN()) {
         
         risultati << i << spazio << dist[i] << spazio << timeRxArray[i].GetSeconds() << ",(" << timeRxNotAssociated[i].GetSeconds() << ")," << timeIdleArray[i].GetSeconds() << ",(" << timeIdleNotAssociated[i].GetSeconds() << ")," << timeTxArray[i].GetSeconds() << ",(" << timeTxNotAssociated[i].GetSeconds() << ")," << timeSleepArray[i].GetSeconds() << ",(" << timeSleepNotAssociated[i].GetSeconds() << ")," << timeCollisionArray[i].GetSeconds() << ",(" << timeCollisionNotAssociated[i].GetSeconds() << ")" << std::endl;
         /*
