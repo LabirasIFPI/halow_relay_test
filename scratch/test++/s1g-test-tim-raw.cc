@@ -17,6 +17,7 @@
  */
 
 #include "s1g-test-tim-raw.h"
+#include "monitor.h"
 
 NS_LOG_COMPONENT_DEFINE("s1g-wifi-network-tim-raw");
 
@@ -1432,6 +1433,13 @@ int main(int argc, char *argv[]) {
 	Ipv4InterfaceContainer relayApInterface = address.Assign(apRelayDevice);
 	staLeafInterface = address.Assign(leafDevice);
 
+	NodeContainer allNodes;
+	allNodes.Add(wifiApNode);
+	allNodes.Add(wifiRelayNode);
+	allNodes.Add(wifiLeafNode);
+
+	InstalarSniffers(allNodes, 3);
+
 	Ipv4StaticRoutingHelper srh;
 
 	// leaves: tudo via AP do relay (interface 1)
@@ -1536,6 +1544,9 @@ int main(int argc, char *argv[]) {
 
 	Simulator::Stop(Seconds(config.simulationTime + config.CoolDownPeriod)); // allow up to a minute after the client & server apps are finished to process the queue
 	Simulator::Run();
+
+	ExportarTudo("resultado", config.simulationTime);
+	LimparSniffers();
 
 	// Visualizer throughput
 	int pay = 0, totalSuccessfulPackets = 0, totalSentPackets = 0, totalPacketsEchoed = 0;
