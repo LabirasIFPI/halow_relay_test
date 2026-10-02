@@ -657,15 +657,32 @@ void onChannelTransmission(Ptr<NetDevice> senderDevice, Ptr<Packet> packet) {
 
 }
 
-int getSTAIdFromAddress(Ipv4Address from) {
-	int staId = -1;
-	for (int i = 0; i < staNodeInterface.GetN(); i++) {
-		if (staNodeInterface.GetAddress(i) == from) {
-			staId = i;
-			break;
-		}
-	}
-	return staId;
+// int getSTAIdFromAddress(Ipv4Address from) {
+// 	int staId = -1;
+// 	for (int i = 0; i < staNodeInterface.GetN(); i++) {
+// 		if (staNodeInterface.GetAddress(i) == from) {
+// 			staId = i;
+// 			break;
+// 		}
+// 	}
+// 	return staId;
+// }
+
+int getSTAIdFromAddress(Ipv4Address from)
+{
+    // Primeiro tenta no container original
+    for (int i = 0; i < staNodeInterface.GetN(); i++) {
+        if (staNodeInterface.GetAddress(i) == from)
+            return i;
+    }
+
+    // Depois tenta no container do outro lado (se existir)
+    for (int i = 0; i < staLeafInterface.GetN(); i++) {
+        if (staLeafInterface.GetAddress(i) == from)
+            return i;   // ← cuidado: o índice é do outro container!
+    }
+
+    return -1;
 }
 
 void udpPacketReceivedAtServer(Ptr<const Packet> packet, Address from) { //works
@@ -1203,7 +1220,7 @@ int main(int argc, char *argv[]) {
 	NodeContainer wifiLeafNode;
 
 	wifiRelayNode.Create(1);
-	wifiLeafNode.Create(16);
+	wifiLeafNode.Create(2);
 	wifiApNode.Create(1);
 
 	wifiStaNode.Add(wifiRelayNode);
@@ -1411,8 +1428,9 @@ int main(int argc, char *argv[]) {
 	apNodeInterface = address.Assign(apDevice);
 
 	address.SetBase("192.168.2.0", "255.255.255.0");
+
 	Ipv4InterfaceContainer relayApInterface = address.Assign(apRelayDevice);
-	Ipv4InterfaceContainer staLeafInterface = address.Assign(leafDevice);
+	staLeafInterface = address.Assign(leafDevice);
 
 	Ipv4StaticRoutingHelper srh;
 

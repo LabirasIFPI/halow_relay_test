@@ -45,6 +45,8 @@ Ipv6InterfaceContainer staNodeInterface6;
 Ipv4InterfaceContainer apNodeInterface;
 Ipv6InterfaceContainer apNodeInterface6;
 
+Ipv4InterfaceContainer staLeafInterface; // folhas
+
 NetDeviceContainer apDevice;
 
 uint16_t currentRps;
