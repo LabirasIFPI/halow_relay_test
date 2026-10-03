@@ -1217,13 +1217,16 @@ int main(int argc, char *argv[]) {
 	RngSeedManager::SetSeed(config.seed);
 	RngSeedManager::SetRun(config.seed);
 
+	// criação dos conteineres que guardaram os nós
 	NodeContainer wifiRelayNode;
 	NodeContainer wifiLeafNode;
 
-	wifiRelayNode.Create(1);
-	wifiLeafNode.Create(2);
-	wifiApNode.Create(1);
+	// criação dos nós
+	wifiRelayNode.Create(1); // relay --> nó 0
+	wifiLeafNode.Create(2); // STAs --> nós 1 e 2
+	wifiApNode.Create(1); // AP --> nó 3
 
+	// Mescla os nós relays + STAs
 	wifiStaNode.Add(wifiRelayNode);
 	wifiStaNode.Add(wifiLeafNode);
 
@@ -1240,8 +1243,10 @@ int main(int argc, char *argv[]) {
 	channel2->TraceConnectWithoutContext("Transmission", MakeCallback(&onChannelTransmission));
 
 	YansWifiPhyHelper phy = YansWifiPhyHelper::Default();
+
+	// definição dos parâmetros do AP
 	phy.SetErrorRateModel("ns3::YansErrorRateModel");
-	phy.SetChannel(channel1);
+	phy.SetChannel(channel1); // salto 1
 	phy.Set("ShortGuardEnabled", BooleanValue(false));
 	phy.Set("ChannelWidth", UintegerValue(getBandwidth(config.DataMode))); // changed
 	phy.Set("EnergyDetectionThreshold", DoubleValue(-110.0));
@@ -1259,32 +1264,35 @@ int main(int argc, char *argv[]) {
 	wifi.SetStandard(WIFI_PHY_STANDARD_80211ah);
 	S1gWifiMacHelper mac = S1gWifiMacHelper::Default();
 
-	Ssid ssid = Ssid("ns380211ah");
-	Ssid relaySsid = Ssid("ns380211ah-relay");
+	Ssid ssid = Ssid("ns380211ah"); // ssid do AP central
+	Ssid relaySsid = Ssid("ns380211ah-relay"); // ssid do relay
 	StringValue DataRate;
 	DataRate = StringValue(getWifiMode(config.DataMode)); // changed
 
 	wifi.SetRemoteStationManager("ns3::ConstantRateWifiManager", "DataMode",DataRate, "ControlMode", DataRate);
     //wifi.SetRemoteStationManager("ns3::ArfWifiManager");
 
-
+	// conexão sta: relay --> AP
 	mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid), "ActiveProbing",
 			BooleanValue(false));
 
 	NetDeviceContainer staRelayDevice;
 	staRelayDevice = wifi.Install(phy, mac, wifiRelayNode);
 
+	// conexão sta: STAs --> relay
 	mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(relaySsid), "ActiveProbing",
 			BooleanValue(false));
 	
-	phy.SetChannel(channel2);
+	phy.SetChannel(channel2); //salto 2
 	NetDeviceContainer leafDevice;
 	leafDevice = wifi.Install(phy, mac, wifiLeafNode);
 
+	// mesclagem das portas STAs
 	NetDeviceContainer staDevice;
 	staDevice.Add(staRelayDevice);
 	staDevice.Add(leafDevice);
 
+	// conexão AP: AP --> Relay
 	mac.SetType ("ns3::ApWifiMac",
 	                 "Ssid", SsidValue (ssid),
 	                 "BeaconInterval", TimeValue (MicroSeconds(config.BeaconInterval)),
@@ -1304,6 +1312,7 @@ int main(int argc, char *argv[]) {
 	phy.SetChannel(channel1);
 	apDevice = wifi.Install(phy, mac, wifiApNode);
 
+	// conexão AP: relay --> STAs
 	mac.SetType ("ns3::ApWifiMac",
 	                 "Ssid", SsidValue (relaySsid),
 	                 "BeaconInterval", TimeValue (MicroSeconds(config.BeaconInterval)),
@@ -1361,6 +1370,7 @@ int main(int argc, char *argv[]) {
 	mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
 	mobility.Install(wifiRelayNode);
 
+	// captura da posição do relay
 	Ptr<MobilityModel> relayMob = wifiRelayNode.Get(0)->GetObject<MobilityModel>();
 	Vector relayPos = relayMob->GetPosition();
 
@@ -1423,11 +1433,13 @@ int main(int argc, char *argv[]) {
 
 	Ipv4AddressHelper address;
 
+	// rede AP <-> Relay
 	address.SetBase("192.168.1.0", "255.255.255.0");
 
 	staNodeInterface = address.Assign(staRelayDevice);
 	apNodeInterface = address.Assign(apDevice);
 
+	// rede Relay <-> STAs
 	address.SetBase("192.168.2.0", "255.255.255.0");
 
 	Ipv4InterfaceContainer relayApInterface = address.Assign(apRelayDevice);
@@ -1440,7 +1452,7 @@ int main(int argc, char *argv[]) {
 
 	InstalarSniffers(allNodes, 3);
 
-	Ipv4StaticRoutingHelper srh;
+	Ipv4StaticRoutingHelper srh; // temporário
 
 	// leaves: tudo via AP do relay (interface 1)
 	for (uint32_t i = 0; i < wifiLeafNode.GetN(); i++) {
