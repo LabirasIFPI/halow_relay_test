@@ -266,8 +266,39 @@ RPS::RawAssignment::GetRawTypeIndex (void) const
 }
 
 RPS::RPS ()
+  : m_length (0),
+    m_rps (0)
 {
-  m_length = 0;
+}
+
+RPS::RPS (const RPS &other)
+  : m_length (0),
+    m_rps (0)
+{
+  *this = other;
+}
+
+RPS &
+RPS::operator= (const RPS &other)
+{
+  if (this == &other)
+    {
+      return *this;
+    }
+
+  // The source may own vector storage (SetRawAssignment) or its receive
+  // array (DeserializeInformationField). A copy must own its active bytes
+  // in either case; copying m_rps would alias storage destroyed elsewhere.
+  std::vector<uint8_t> bytes;
+  if (other.m_length != 0)
+    {
+      NS_ASSERT_MSG (other.m_rps != 0, "RPS length requires initialized assignment bytes");
+      bytes.assign (other.m_rps, other.m_rps + other.m_length);
+    }
+  m_rpsarry.swap (bytes);
+  m_length = other.m_length;
+  m_rps = m_rpsarry.empty () ? 0 : &m_rpsarry[0];
+  return *this;
 }
 
 RPS::~RPS ()
