@@ -1181,6 +1181,18 @@ int main(int argc, char *argv[]) {
 	bool OutputPosition = true;
 	config = Configuration(argc, argv);
 
+	config.Nsta =
+    config.Nrelays +
+    config.Nrelays * config.NleafsPerRelay;
+
+	// Novos vetores
+	vector<NodeContainer>      leafsOfRelay(config.Nrelays);      // nós leaf de cada relay
+	vector<Ptr<YansWifiChannel>> channelPerRelay(config.Nrelays); // canal downlink de cada relay
+	vector<NetDeviceContainer> apRelayDevices(config.Nrelays);    // device AP de cada relay
+	vector<NetDeviceContainer> leafDevices(config.Nrelays);       // devices STA das leaves de cada relay
+	vector<Ipv4InterfaceContainer> relayApIf(config.Nrelays);     // IP do AP de cada relay
+	vector<Ipv4InterfaceContainer> leafIf(config.Nrelays);        // IP das leaves de cada relay
+
     configureRAW(config.rps, config.RAWConfigFile);
 	// config.Nsta = config.NRawSta;
 
@@ -1217,18 +1229,16 @@ int main(int argc, char *argv[]) {
 	RngSeedManager::SetSeed(config.seed);
 	RngSeedManager::SetRun(config.seed);
 
-	// criação dos conteineres que guardaram os nós
-	NodeContainer wifiRelayNode;
-	NodeContainer wifiLeafNode;
-
 	// criação dos nós
-	wifiRelayNode.Create(1); // relay --> nó 0
-	wifiLeafNode.Create(2); // STAs --> nós 1 e 2
-	wifiApNode.Create(1); // AP --> nó 3
+	wifiRelayNode.Create(config.Nrelays); // relays
 
-	// Mescla os nós relays + STAs
-	wifiStaNode.Add(wifiRelayNode);
-	wifiStaNode.Add(wifiLeafNode);
+	// criação das folhas
+	for(uint32_t i = 0; i < config.Nrelays; i++) {
+		leafsOfRelay[i].Create(config.NleafsPerRelay);
+		wifiLeafNode.Add(leafsOfRelay[i]);
+	}
+
+	wifiApNode.Create(1); // AP
 
 	YansWifiChannelHelper channelBuilder = YansWifiChannelHelper();
 	channelBuilder.AddPropagationLoss("ns3::LogDistancePropagationLossModel",
@@ -1236,17 +1246,15 @@ int main(int argc, char *argv[]) {
 			"ReferenceDistance", DoubleValue(1.0));
 	channelBuilder.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
 
-	Ptr<YansWifiChannel> channel1 = channelBuilder.Create(); // salto 1: AP raiz <-> STA do relay
-	Ptr<YansWifiChannel> channel2 = channelBuilder.Create(); // salto 2: AP do relay <-> leaves
+	Ptr<YansWifiChannel> channel1 = channelBuilder.Create(); // salto compartilhado: AP raiz <-> STA dos relays
 
 	channel1->TraceConnectWithoutContext("Transmission", MakeCallback(&onChannelTransmission));
-	channel2->TraceConnectWithoutContext("Transmission", MakeCallback(&onChannelTransmission));
 
 	YansWifiPhyHelper phy = YansWifiPhyHelper::Default();
 
 	// definição dos parâmetros do AP
 	phy.SetErrorRateModel("ns3::YansErrorRateModel");
-	phy.SetChannel(channel1); // salto 1
+	phy.SetChannel(channel1);
 	phy.Set("ShortGuardEnabled", BooleanValue(false));
 	phy.Set("ChannelWidth", UintegerValue(getBandwidth(config.DataMode))); // changed
 	phy.Set("EnergyDetectionThreshold", DoubleValue(-110.0));
@@ -1265,7 +1273,6 @@ int main(int argc, char *argv[]) {
 	S1gWifiMacHelper mac = S1gWifiMacHelper::Default();
 
 	Ssid ssid = Ssid("ns380211ah"); // ssid do AP central
-	Ssid relaySsid = Ssid("ns380211ah-relay"); // ssid do relay
 	StringValue DataRate;
 	DataRate = StringValue(getWifiMode(config.DataMode)); // changed
 
@@ -1278,19 +1285,6 @@ int main(int argc, char *argv[]) {
 
 	NetDeviceContainer staRelayDevice;
 	staRelayDevice = wifi.Install(phy, mac, wifiRelayNode);
-
-	// conexão sta: STAs --> relay
-	mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(relaySsid), "ActiveProbing",
-			BooleanValue(false));
-	
-	phy.SetChannel(channel2); //salto 2
-	NetDeviceContainer leafDevice;
-	leafDevice = wifi.Install(phy, mac, wifiLeafNode);
-
-	// mesclagem das portas STAs
-	NetDeviceContainer staDevice;
-	staDevice.Add(staRelayDevice);
-	staDevice.Add(leafDevice);
 
 	// conexão AP: AP --> Relay
 	mac.SetType ("ns3::ApWifiMac",
@@ -1309,22 +1303,39 @@ int main(int argc, char *argv[]) {
 	phy.Set("TxPowerStart", DoubleValue(30.0));
 	phy.Set("RxNoiseFigure", DoubleValue(6.8));
 
-	phy.SetChannel(channel1);
 	apDevice = wifi.Install(phy, mac, wifiApNode);
 
-	// conexão AP: relay --> STAs
-	mac.SetType ("ns3::ApWifiMac",
+	for (uint32_t i = 0; i < config.Nrelays; i++) {
+		channelPerRelay[i] = channelBuilder.Create();
+		channelPerRelay[i]->TraceConnectWithoutContext("Transmission", MakeCallback(&onChannelTransmission));
+
+		Ssid relaySsid = Ssid("ns380211ah-relay-" + std::to_string(i));
+
+		phy.SetChannel(channelPerRelay[i]);
+
+		mac.SetType("ns3::ApWifiMac",
 	                 "Ssid", SsidValue (relaySsid),
 	                 "BeaconInterval", TimeValue (MicroSeconds(config.BeaconInterval)),
 	                 "NRawStations", UintegerValue (config.NRawSta),
 	                 "RPSsetup", RPSVectorValue (config.rps),
 	                 "PageSliceSet", pageSliceValue (config.pageS),
-	                 "TIMSet", TIMValue (config.tim)
-	               );
+	                 "TIMSet", TIMValue (config.tim));
 
-	phy.SetChannel(channel2);
-	NetDeviceContainer apRelayDevice;
-	apRelayDevice = wifi.Install(phy, mac, wifiRelayNode);
+		apRelayDevices[i] = wifi.Install(phy, mac, NodeContainer(wifiRelayNode.Get(i)));
+
+		mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(relaySsid), "ActiveProbing", BooleanValue(false));
+		leafDevices[i] = wifi.Install(phy, mac, leafsOfRelay[i]);
+}
+
+	wifiStaNode.Add(wifiRelayNode);
+	for (uint32_t i = 0; i < config.Nrelays; i++) {
+    wifiStaNode.Add(leafsOfRelay[i]);
+	}
+
+	staDevice.Add(staRelayDevice);
+	for (uint32_t i = 0; i < config.Nrelays; i++) {
+		staDevice.Add(leafDevices[i]);
+	}
 
 	Config::Set(
 			"/NodeList/*/DeviceList/0/$ns3::WifiNetDevice/Mac/$ns3::RegularWifiMac/BE_EdcaTxopN/Queue/MaxPacketNumber",
@@ -1360,35 +1371,46 @@ int main(int argc, char *argv[]) {
 	Config::ConnectWithoutContext(oss.str() + "RawGroup", MakeCallback(&RawGroupTrace));
 	Config::ConnectWithoutContext(oss.str() + "RawSlot", MakeCallback(&RawSlotTrace));
 
-	// mobility.
-	MobilityHelper mobility;
+	// posicionamento do AP
 	double xpos = std::stoi(config.rho, nullptr, 0);
 	double ypos = xpos;
-	mobility.SetPositionAllocator("ns3::UniformDiscPositionAllocator", "X",
-			StringValue(std::to_string(xpos)), "Y",
-			StringValue(std::to_string(ypos)), "rho", StringValue(config.rho));
-	mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-	mobility.Install(wifiRelayNode);
-
-	// captura da posição do relay
-	Ptr<MobilityModel> relayMob = wifiRelayNode.Get(0)->GetObject<MobilityModel>();
-	Vector relayPos = relayMob->GetPosition();
-
-	MobilityHelper staMobility;
-	staMobility.SetPositionAllocator("ns3::UniformDiscPositionAllocator",
-									"X", DoubleValue(relayPos.x),
-									"Y", DoubleValue(relayPos.y),
-									"rho", DoubleValue(20.0));  // raio em metros
-	staMobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-	staMobility.Install(wifiLeafNode);
-
+	Vector apPos(xpos, ypos, 0.0);
 	MobilityHelper mobilityAp;
 	Ptr<ListPositionAllocator> positionAlloc = CreateObject<
 			ListPositionAllocator>();
-	positionAlloc->Add(Vector(xpos, ypos, 0.0));
+	positionAlloc->Add(apPos);
 	mobilityAp.SetPositionAllocator(positionAlloc);
 	mobilityAp.SetMobilityModel("ns3::ConstantPositionMobilityModel");
 	mobilityAp.Install(wifiApNode);
+    
+	// poscionamneto das relays e das folhas
+	for (uint32_t i = 0; i < config.Nrelays; i++) {
+		MobilityHelper relayMob;
+		relayMob.SetPositionAllocator("ns3::UniformDiscPositionAllocator", "X",
+			StringValue(std::to_string(xpos)), "Y",
+			StringValue(std::to_string(ypos)), "rho", StringValue(config.rho));
+		relayMob.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+		relayMob.Install(wifiRelayNode.Get(i));
+
+		Ptr<MobilityModel> relayMobx = wifiRelayNode.Get(i)->GetObject<MobilityModel>();
+		Vector relayPos = relayMobx->GetPosition();
+
+		// direção AP->relay, normalizada
+		double dx = relayPos.x - apPos.x, dy = relayPos.y - apPos.y;
+		double norm = std::sqrt(dx*dx + dy*dy);
+		double ux = dx / norm, uy = dy / norm;
+
+		double pushOut = 20.0; // quanto empurrar o centro do cluster de leaves pra além do relay
+		Vector leafCenter(relayPos.x + ux * pushOut, relayPos.y + uy * pushOut, 0.0);
+
+		MobilityHelper leafMob;
+		leafMob.SetPositionAllocator("ns3::UniformDiscPositionAllocator",
+				"X", DoubleValue(leafCenter.x),
+				"Y", DoubleValue(leafCenter.y),
+				"rho", DoubleValue(20.0));
+		leafMob.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+		leafMob.Install(leafsOfRelay[i]);
+	}
 
 	/*
 
@@ -1433,43 +1455,46 @@ int main(int argc, char *argv[]) {
 
 	Ipv4AddressHelper address;
 
-	// rede AP <-> Relay
-	address.SetBase("192.168.1.0", "255.255.255.0");
-
+	address.SetBase("192.168.1.0", "255.255.255.0"); // uplink, único, compartilhado
 	staNodeInterface = address.Assign(staRelayDevice);
-	apNodeInterface = address.Assign(apDevice);
+	apNodeInterface  = address.Assign(apDevice);
 
-	// rede Relay <-> STAs
-	address.SetBase("192.168.2.0", "255.255.255.0");
-
-	Ipv4InterfaceContainer relayApInterface = address.Assign(apRelayDevice);
-	staLeafInterface = address.Assign(leafDevice);
-
-	NodeContainer allNodes;
-	allNodes.Add(wifiApNode);
-	allNodes.Add(wifiRelayNode);
-	allNodes.Add(wifiLeafNode);
-
-	InstalarSniffers(allNodes, 3);
-
-	Ipv4StaticRoutingHelper srh; // temporário
-
-	// leaves: tudo via AP do relay (interface 1)
-	for (uint32_t i = 0; i < wifiLeafNode.GetN(); i++) {
-		Ptr<Ipv4StaticRouting> r = srh.GetStaticRouting(wifiLeafNode.Get(i)->GetObject<Ipv4>());
-		r->SetDefaultRoute(relayApInterface.GetAddress(0), 1);
+	for (uint32_t i = 0; i < config.Nrelays; i++) {
+		std::ostringstream net;
+		net << "192.168." << (2 + i) << ".0"; // 192.168.2.0, 192.168.3.0, ...
+		address.SetBase(net.str().c_str(), "255.255.255.0");
+		relayApIf[i] = address.Assign(apRelayDevices[i]);
+		leafIf[i]    = address.Assign(leafDevices[i]);
 	}
-	// relay: o que não é 192.168.2.0/24 sobe pelo AP raiz (interface 1 = STA)
-	srh.GetStaticRouting(wifiRelayNode.Get(0)->GetObject<Ipv4>())
-	->SetDefaultRoute(apNodeInterface.GetAddress(0), 1);
-	// AP raiz: rede das leaves via relay
-	srh.GetStaticRouting(wifiApNode.Get(0)->GetObject<Ipv4>())
-	->AddNetworkRouteTo(Ipv4Address("192.168.2.0"), Ipv4Mask("255.255.255.0"),
-						staNodeInterface.GetAddress(0), 1);
+
+	allNodes.Add(wifiStaNode);
+	allNodes.Add(wifiApNode);
+
+	InstalarSniffers(allNodes, wifiApNode.Get(0)->GetId());
+
+	Ipv4StaticRoutingHelper srh;
+
+	for (uint32_t i = 0; i < config.Nrelays; i++) {
+		// leaves do relay i: tudo sai pelo AP do próprio relay
+		for (uint32_t j = 0; j < leafsOfRelay[i].GetN(); j++) {
+			srh.GetStaticRouting(leafsOfRelay[i].Get(j)->GetObject<Ipv4>())
+			->SetDefaultRoute(relayApIf[i].GetAddress(0), 1);
+		}
+		// relay i: tudo que não é a própria rede de leaves sobe pro AP central
+		srh.GetStaticRouting(wifiRelayNode.Get(i)->GetObject<Ipv4>())
+		->SetDefaultRoute(apNodeInterface.GetAddress(0), 1);
+
+		// AP central: rota específica pra rede de leaves do relay i, via o relay i
+		std::ostringstream net;
+		net << "192.168." << (2 + i) << ".0";
+		srh.GetStaticRouting(wifiApNode.Get(0)->GetObject<Ipv4>())
+		->AddNetworkRouteTo(Ipv4Address(net.str().c_str()), Ipv4Mask("255.255.255.0"),
+							staNodeInterface.GetAddress(i), 1);
+	}
 
 	//trace association
 	std::cout << "Configuring trace sources..." << std::endl;
-	for (uint16_t kk = 0; kk < wifiStaNode.GetN(); kk++) {
+	for (uint16_t kk = 0; kk < wifiApNode.Get(0)->GetId(); kk++) {
 		std::ostringstream STA;
 		STA << kk;
 		std::string strSTA = STA.str();

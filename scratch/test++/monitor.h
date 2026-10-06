@@ -171,7 +171,7 @@ public:
         // RSSI do enlace nó <-> AP central
         uint32_t key = 0xFFFFFFFF;
         if (m_nodeId == g_centralApId && sender != 0xFFFFFFFF) key = sender;   // AP ouvindo o nó
-        else if (sender == g_centralApId)                      key = m_nodeId; // nó ouvindo o AP
+        else if (g_nodeRole[sender] == NodeRole::AP || g_nodeRole[sender] == NodeRole::RELAY)                      key = m_nodeId; // nó ouvindo o AP
         if (key != 0xFFFFFFFF) {
             g_rssiNodeAp[key].first  += signalDbm;
             g_rssiNodeAp[key].second += 1;
@@ -466,6 +466,9 @@ void ExportarNosCsv(const std::string& filename, double simTime)
     out << "node_id,role,tx_packets,tx_bytes,rx_packets,rx_bytes,fwd_packets,fwd_bytes,"
            "delivered_packets,delivered_bytes,throughput_kbps,rssi_medio_ate_ap_dbm\n";
     for (const auto& kv : g_nodeRole) {
+        if (kv.first == 0xFFFFFFFFu || kv.first == static_cast<uint32_t>(-1))
+        continue;
+        
         const NodeStats& s = g_nodeStats[kv.first];
         auto r = g_rssiNodeAp.find(kv.first);
         out << kv.first << "," << RoleToString(kv.second) << ","

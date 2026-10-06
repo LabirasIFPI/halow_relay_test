@@ -39,6 +39,10 @@ using namespace ns3;
 NodeContainer wifiStaNode;
 NodeContainer wifiApNode;
 
+NodeContainer wifiRelayNode;
+NodeContainer wifiLeafNode;
+NodeContainer allNodes;
+
 Ipv4InterfaceContainer staNodeInterface;
 Ipv6InterfaceContainer staNodeInterface6;
 
@@ -48,6 +52,7 @@ Ipv6InterfaceContainer apNodeInterface6;
 Ipv4InterfaceContainer staLeafInterface; // folhas
 
 NetDeviceContainer apDevice;
+NetDeviceContainer staDevice;
 
 uint16_t currentRps;
 uint16_t currentRawGroup;

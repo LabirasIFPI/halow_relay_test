@@ -136,6 +136,10 @@ struct Configuration {
 
 	uint16_t CoolDownPeriod = 4; //60
 
+	uint32_t Nrelays;
+
+	uint32_t NleafsPerRelay;
+
 	Configuration();
 	Configuration(int argc, char *argv[]);
 

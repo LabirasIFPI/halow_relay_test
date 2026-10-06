@@ -12,7 +12,7 @@ Configuration::Configuration(int argc, char *argv[]) {
      */
     cmd.AddValue("seed", "random seed", seed);
     cmd.AddValue("simulationTime", "Simulation time in seconds", simulationTime);
-    cmd.AddValue("Nsta", "number of total stations", Nsta);
+    // cmd.AddValue("Nsta", "number of total stations", Nsta);
     cmd.AddValue("NRawSta", "number of stations supporting RAW. If -1 it will be based on NSta, should be divisible by NGroup", NRawSta);
     cmd.AddValue ("payloadSize", "Size of payload to send in bytes", payloadSize);
     cmd.AddValue("BeaconInterval", "Beacon interval time in us", BeaconInterval);
@@ -36,6 +36,8 @@ Configuration::Configuration(int argc, char *argv[]) {
     cmd.AddValue("timOffset", "Offset in number of Beacon Intervals from the DTIM that carries the first page slice of the page", timOffset);
     cmd.AddValue("TrafficInterval", "Traffic interval time in ms", trafficInterval);
     cmd.AddValue("Outputpath", "files path of each stations", OutputPath);
+    cmd.AddValue("Nrelays","Numbers of relays in simulation",Nrelays);
+    cmd.AddValue("Nleaves","Numbers of leaves per relay in simulation",NleafsPerRelay);
 
 /*
     cmd.AddValue("SlotFormat", "format of NRawSlotCount, -1 will auto calculate based on raw slot num", SlotFormat);
