@@ -1181,18 +1181,6 @@ int main(int argc, char *argv[]) {
 	bool OutputPosition = true;
 	config = Configuration(argc, argv);
 
-	config.Nsta =
-    config.Nrelays +
-    config.Nrelays * config.NleafsPerRelay;
-
-	// Novos vetores
-	vector<NodeContainer>      leafsOfRelay(config.Nrelays);      // nós leaf de cada relay
-	vector<Ptr<YansWifiChannel>> channelPerRelay(config.Nrelays); // canal downlink de cada relay
-	vector<NetDeviceContainer> apRelayDevices(config.Nrelays);    // device AP de cada relay
-	vector<NetDeviceContainer> leafDevices(config.Nrelays);       // devices STA das leaves de cada relay
-	vector<Ipv4InterfaceContainer> relayApIf(config.Nrelays);     // IP do AP de cada relay
-	vector<Ipv4InterfaceContainer> leafIf(config.Nrelays);        // IP das leaves de cada relay
-
     configureRAW(config.rps, config.RAWConfigFile);
 	// config.Nsta = config.NRawSta;
 
@@ -1230,13 +1218,7 @@ int main(int argc, char *argv[]) {
 	RngSeedManager::SetRun(config.seed);
 
 	// criação dos nós
-	wifiRelayNode.Create(config.Nrelays); // relays
-
-	// criação das folhas
-	for(uint32_t i = 0; i < config.Nrelays; i++) {
-		leafsOfRelay[i].Create(config.NleafsPerRelay);
-		wifiLeafNode.Add(leafsOfRelay[i]);
-	}
+	wifiStaNode.Create(config.Nsta); // Stas
 
 	wifiApNode.Create(1); // AP
 
@@ -1252,7 +1234,6 @@ int main(int argc, char *argv[]) {
 
 	YansWifiPhyHelper phy = YansWifiPhyHelper::Default();
 
-	// definição dos parâmetros do AP
 	phy.SetErrorRateModel("ns3::YansErrorRateModel");
 	phy.SetChannel(channel1);
 	phy.Set("ShortGuardEnabled", BooleanValue(false));
@@ -1283,8 +1264,8 @@ int main(int argc, char *argv[]) {
 	mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid), "ActiveProbing",
 			BooleanValue(false));
 
-	NetDeviceContainer staRelayDevice;
-	staRelayDevice = wifi.Install(phy, mac, wifiRelayNode);
+	NetDeviceContainer staDevice;
+	staDevice = wifi.Install(phy, mac, wifiStaNode);
 
 	// conexão AP: AP --> Relay
 	mac.SetType ("ns3::ApWifiMac",
@@ -1304,38 +1285,6 @@ int main(int argc, char *argv[]) {
 	phy.Set("RxNoiseFigure", DoubleValue(6.8));
 
 	apDevice = wifi.Install(phy, mac, wifiApNode);
-
-	for (uint32_t i = 0; i < config.Nrelays; i++) {
-		channelPerRelay[i] = channelBuilder.Create();
-		channelPerRelay[i]->TraceConnectWithoutContext("Transmission", MakeCallback(&onChannelTransmission));
-
-		Ssid relaySsid = Ssid("ns380211ah-relay-" + std::to_string(i));
-
-		phy.SetChannel(channelPerRelay[i]);
-
-		mac.SetType("ns3::ApWifiMac",
-	                 "Ssid", SsidValue (relaySsid),
-	                 "BeaconInterval", TimeValue (MicroSeconds(config.BeaconInterval)),
-	                 "NRawStations", UintegerValue (config.NRawSta),
-	                 "RPSsetup", RPSVectorValue (config.rps),
-	                 "PageSliceSet", pageSliceValue (config.pageS),
-	                 "TIMSet", TIMValue (config.tim));
-
-		apRelayDevices[i] = wifi.Install(phy, mac, NodeContainer(wifiRelayNode.Get(i)));
-
-		mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(relaySsid), "ActiveProbing", BooleanValue(false));
-		leafDevices[i] = wifi.Install(phy, mac, leafsOfRelay[i]);
-}
-
-	wifiStaNode.Add(wifiRelayNode);
-	for (uint32_t i = 0; i < config.Nrelays; i++) {
-    wifiStaNode.Add(leafsOfRelay[i]);
-	}
-
-	staDevice.Add(staRelayDevice);
-	for (uint32_t i = 0; i < config.Nrelays; i++) {
-		staDevice.Add(leafDevices[i]);
-	}
 
 	Config::Set(
 			"/NodeList/*/DeviceList/0/$ns3::WifiNetDevice/Mac/$ns3::RegularWifiMac/BE_EdcaTxopN/Queue/MaxPacketNumber",
@@ -1371,47 +1320,36 @@ int main(int argc, char *argv[]) {
 	Config::ConnectWithoutContext(oss.str() + "RawGroup", MakeCallback(&RawGroupTrace));
 	Config::ConnectWithoutContext(oss.str() + "RawSlot", MakeCallback(&RawSlotTrace));
 
-	// posicionamento do AP
+	// Gateway (AP) = célula (0,0) da matriz
 	double xpos = std::stoi(config.rho, nullptr, 0);
 	double ypos = xpos;
-	Vector apPos(xpos, ypos, 0.0);
+	double spacing = 100.0;   // distância entre células (m) -> idealmente vira parâmetro
+
 	MobilityHelper mobilityAp;
-	Ptr<ListPositionAllocator> positionAlloc = CreateObject<
-			ListPositionAllocator>();
-	positionAlloc->Add(apPos);
-	mobilityAp.SetPositionAllocator(positionAlloc);
+	Ptr<ListPositionAllocator> apAlloc = CreateObject<ListPositionAllocator>();
+	apAlloc->Add(Vector(xpos, ypos, 0.0));
+	mobilityAp.SetPositionAllocator(apAlloc);
 	mobilityAp.SetMobilityModel("ns3::ConstantPositionMobilityModel");
 	mobilityAp.Install(wifiApNode);
-    
-	// poscionamneto das relays e das folhas
-	for (uint32_t i = 0; i < config.Nrelays; i++) {
-		MobilityHelper relayMob;
-		relayMob.SetPositionAllocator("ns3::UniformDiscPositionAllocator", "X",
-			StringValue(std::to_string(xpos)), "Y",
-			StringValue(std::to_string(ypos)), "rho", StringValue(config.rho));
-		relayMob.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-		relayMob.Install(wifiRelayNode.Get(i));
 
-		Ptr<MobilityModel> relayMobx = wifiRelayNode.Get(i)->GetObject<MobilityModel>();
-		Vector relayPos = relayMobx->GetPosition();
+	// STAs: matriz com Nsta+1 células (a 0,0 é o gateway)
+	uint32_t cols = (uint32_t) std::ceil(std::sqrt((double)config.Nsta + 1));
 
-		// direção AP->relay, normalizada
-		double dx = relayPos.x - apPos.x, dy = relayPos.y - apPos.y;
-		double norm = std::sqrt(dx*dx + dy*dy);
-		double ux = dx / norm, uy = dy / norm;
-
-		double pushOut = 20.0; // quanto empurrar o centro do cluster de leaves pra além do relay
-		Vector leafCenter(relayPos.x + ux * pushOut, relayPos.y + uy * pushOut, 0.0);
-
-		MobilityHelper leafMob;
-		leafMob.SetPositionAllocator("ns3::UniformDiscPositionAllocator",
-				"X", DoubleValue(leafCenter.x),
-				"Y", DoubleValue(leafCenter.y),
-				"rho", DoubleValue(20.0));
-		leafMob.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-		leafMob.Install(leafsOfRelay[i]);
+	Ptr<ListPositionAllocator> staAlloc = CreateObject<ListPositionAllocator>();
+	uint32_t placed = 0;
+	for (uint32_t linha = 0; placed < config.Nsta; linha++) {
+		for (uint32_t coluna = 0; coluna < cols && placed < config.Nsta; coluna++) {
+			if (linha == 0 && coluna == 0) continue;   // célula do gateway
+			staAlloc->Add(Vector(xpos + coluna * spacing,
+								ypos + linha * spacing, 0.0));
+			placed++;
+		}
 	}
 
+	MobilityHelper mobilitySta;
+	mobilitySta.SetPositionAllocator(staAlloc);
+	mobilitySta.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+	mobilitySta.Install(wifiStaNode);
 	/*
 
 	 MobilityHelper mobilityApCamera;
@@ -1455,42 +1393,14 @@ int main(int argc, char *argv[]) {
 
 	Ipv4AddressHelper address;
 
-	address.SetBase("192.168.1.0", "255.255.255.0"); // uplink, único, compartilhado
-	staNodeInterface = address.Assign(staRelayDevice);
+	address.SetBase("10.0.0.0", "255.0.0.0"); // uplink, único, compartilhado
+	staNodeInterface = address.Assign(staDevice);
 	apNodeInterface  = address.Assign(apDevice);
-
-	for (uint32_t i = 0; i < config.Nrelays; i++) {
-		std::ostringstream net;
-		net << "192.168." << (2 + i) << ".0"; // 192.168.2.0, 192.168.3.0, ...
-		address.SetBase(net.str().c_str(), "255.255.255.0");
-		relayApIf[i] = address.Assign(apRelayDevices[i]);
-		leafIf[i]    = address.Assign(leafDevices[i]);
-	}
 
 	allNodes.Add(wifiStaNode);
 	allNodes.Add(wifiApNode);
 
 	InstalarSniffers(allNodes, wifiApNode.Get(0)->GetId());
-
-	Ipv4StaticRoutingHelper srh;
-
-	for (uint32_t i = 0; i < config.Nrelays; i++) {
-		// leaves do relay i: tudo sai pelo AP do próprio relay
-		for (uint32_t j = 0; j < leafsOfRelay[i].GetN(); j++) {
-			srh.GetStaticRouting(leafsOfRelay[i].Get(j)->GetObject<Ipv4>())
-			->SetDefaultRoute(relayApIf[i].GetAddress(0), 1);
-		}
-		// relay i: tudo que não é a própria rede de leaves sobe pro AP central
-		srh.GetStaticRouting(wifiRelayNode.Get(i)->GetObject<Ipv4>())
-		->SetDefaultRoute(apNodeInterface.GetAddress(0), 1);
-
-		// AP central: rota específica pra rede de leaves do relay i, via o relay i
-		std::ostringstream net;
-		net << "192.168." << (2 + i) << ".0";
-		srh.GetStaticRouting(wifiApNode.Get(0)->GetObject<Ipv4>())
-		->AddNetworkRouteTo(Ipv4Address(net.str().c_str()), Ipv4Mask("255.255.255.0"),
-							staNodeInterface.GetAddress(i), 1);
-	}
 
 	//trace association
 	std::cout << "Configuring trace sources..." << std::endl;

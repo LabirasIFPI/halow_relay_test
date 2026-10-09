@@ -17,7 +17,6 @@
  */
 
 #include "s1g-test-tim-raw.h"
-#include "meupau.cc"
 
 NS_LOG_COMPONENT_DEFINE("s1g-wifi-network-tim-raw");
 
@@ -1155,7 +1154,6 @@ void PhyStateTrace(std::string context, Time start, Time duration,
 }
 
 int main(int argc, char *argv[]) {
-	signal(SIGFPE, sigHandler); 
 	//LogComponentEnable ("UdpServer", LOG_INFO);
 	 LogComponentEnable ("UdpEchoServerApplication", LOG_INFO);
 	 LogComponentEnable ("UdpEchoClientApplication", LOG_INFO);
