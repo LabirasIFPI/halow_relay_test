@@ -606,7 +606,11 @@ ApWifiMac::GetSlotStartTimeFromAid (uint16_t aid) const
 		slotNum = ass.GetSlotNum();
 		Time slotDuration = MicroSeconds(500 + slotDurationCount * 120);
 		lastRawDurationus += slotDuration * slotNum;
-		if (ass.GetRawGroupAIDStart() <= aid && aid <= ass.GetRawGroupAIDEnd()) {
+		const uint8_t aidPage = (aid >> 11) & 0x03;
+		const uint16_t pageLocalAid = aid & 0x07ff;
+		if (ass.GetRawGroupPage() == aidPage &&
+		    ass.GetRawGroupAIDStart() <= pageLocalAid &&
+		    pageLocalAid <= ass.GetRawGroupAIDEnd()) {
 			uint16_t statRawSlot = (aid & 0x03ff) % slotNum;
 			Time start = MicroSeconds((500 + slotDurationCount * 120) * statRawSlot + currentRAW_start);
 			NS_LOG_DEBUG ("[aid=" << aid << "] is located in RAW " << (int)raw_index + 1 << " in slot " << statRawSlot + 1 << ". RAW slot start time relative to the beacon = " << start.GetMicroSeconds() << " us.");
@@ -933,20 +937,11 @@ uint16_t ApWifiMac::RpsIndex = 0;
 void
 ApWifiMac::SetaccessList (std::map<Mac48Address, bool> list)
 {
-        Mac48Address stasAddr;
-
-            
         if (list.size () == 0)
          {
             return;
          }
-              
-        for (uint32_t k = 1; k <= m_totalStaNum; k++)
-          {   
-            stasAddr = m_AidToMacAddr.find(k)->second;
-            //NS_LOG_UNCOND ( "aid "  << k << ", send " << list.find(stasAddr)->second << ", at " << Simulator::Now () << ", size " << list.size ());
-          }     
-               
+
         m_edca.find (AC_VO)->second->SetaccessList (list);
         m_edca.find (AC_VI)->second->SetaccessList (list);
         m_edca.find (AC_BE)->second->SetaccessList (list);
@@ -1220,21 +1215,16 @@ ApWifiMac::SendOneBeacon (void)
       //NS_LOG_UNCOND ("ap send beacon at " << Simulator::Now ());
 
       m_accessList.clear ();
-      for (uint16_t i=1; i<= m_totalStaNum;i++)
+      // Iterate only over AIDs actually assigned so far. During association,
+      // the AID map may not yet contain every configured station.
+      for (auto it = m_AidToMacAddr.begin (); it != m_AidToMacAddr.end (); ++it)
       {
-    	  // assume all station sleeps, then change some to awake state based on downlink data
-    	  //This implementation is temporary, should be removed if ps-poll is supported
-    	  if (m_AidToMacAddr.size () == 0)
-    	  {
-    		  break;
-    	  }
-    	  stasAddr = m_AidToMacAddr.find(i)->second;
-
-    	  if (m_stationManager->IsAssociated (stasAddr))
-    	  {
-    		  m_accessList[stasAddr]=false;
-    	  }
-     }
+          stasAddr = it->second;
+          if (m_stationManager->IsAssociated (stasAddr))
+          {
+              m_accessList[stasAddr] = false;
+          }
+      }
       //NS_LOG_UNCOND ("m_accessList.size " << m_accessList.size ());
 
 
@@ -1246,32 +1236,33 @@ ApWifiMac::SendOneBeacon (void)
     	  {
     		  break;
     	  }
+          const RPS::RawAssignment rawAssignment = m_rps->GetRawAssigmentObj(g);
+          const uint32_t pageOffset = uint32_t(rawAssignment.GetRawGroupPage()) * 2048;
+          startaid = pageOffset + rawAssignment.GetRawGroupAIDStart();
+          endaid = pageOffset + rawAssignment.GetRawGroupAIDEnd();
 
+          // RAW AID ranges are page-local (11 bits); convert to global AIDs
+          // before looking up the associated station in m_AidToMacAddr.
+          statsPerSlot = (endaid - startaid + 1) / rawAssignment.GetSlotNum();
 
-    	  startaid = m_rps->GetRawAssigmentObj(g).GetRawGroupAIDStart();
-    	  endaid = m_rps->GetRawAssigmentObj(g).GetRawGroupAIDEnd();
-
-
-
-    	  //offset =0; // for test
-    	  //m_slotNum=m_rps->GetRawAssigmentObj(g).GetSlotNum();
-    	  statsPerSlot = (endaid - startaid + 1)/m_rps->GetRawAssigmentObj(g).GetSlotNum();
-
-    	  for (uint32_t i = 0; i < m_rps->GetRawAssigmentObj(g).GetSlotNum(); i++)
-    	  {
-    		  for (uint32_t k = startaid; k <= endaid; k++)
-    		  {
-
-    			  statRawSlot = (k & 0x03ff) % m_rps->GetRawAssigmentObj(g).GetSlotNum(); //slot that the station k will be
+          for (uint32_t i = 0; i < rawAssignment.GetSlotNum(); i++)
+          {
+              for (uint32_t k = startaid; k <= endaid; k++)
+              {
+                  statRawSlot = (k & 0x03ff) % rawAssignment.GetSlotNum(); // slot for station k
     			  // station is in sot i
-    			  if (statRawSlot == i )
-    			  {
-    				  stasAddr = m_AidToMacAddr.find(k)->second;
-    				  if (m_stationManager->IsAssociated (stasAddr))
-    				  {
-    					  m_accessList[stasAddr]=true;
-    				  }
-    			  }
+                  if (statRawSlot == i)
+                  {
+                      auto aidIt = m_AidToMacAddr.find(k);
+                      if (aidIt != m_AidToMacAddr.end())
+                      {
+                          stasAddr = aidIt->second;
+                          if (m_stationManager->IsAssociated (stasAddr))
+                          {
+                              m_accessList[stasAddr] = true;
+                          }
+                      }
+                  }
 
     		  }
     		  Simulator::Schedule(bufferTimeToAllowBeaconToBeReceived + timeToSlotStart,
@@ -1280,17 +1271,15 @@ ApWifiMac::SendOneBeacon (void)
     		  Simulator::Schedule(
     				  bufferTimeToAllowBeaconToBeReceived + timeToSlotStart,
     				  &ApWifiMac::OnRAWSlotStart, this, RpsIndex, g + 1, i + 1);
-    		  timeToSlotStart += MicroSeconds(500 + m_rps->GetRawAssigmentObj(g).GetSlotDurationCount() * 120);
-
-    		  for (uint16_t i=1; i<= m_totalStaNum;i++)
-    		  {
-    			  stasAddr = m_AidToMacAddr.find(i)->second;
-
-    			  if (m_stationManager->IsAssociated (stasAddr))
-    			  {
-    				  m_accessList[stasAddr]=false;
-    			  }
-    		  }
+    		  timeToSlotStart += MicroSeconds(500 + rawAssignment.GetSlotDurationCount() * 120);
+              for (auto it = m_AidToMacAddr.begin (); it != m_AidToMacAddr.end (); ++it)
+              {
+                  stasAddr = it->second;
+                  if (m_stationManager->IsAssociated (stasAddr))
+                  {
+                      m_accessList[stasAddr] = false;
+                  }
+              }
     	  }
       }
       //NS_LOG_UNCOND(GetAddress () << ", " << startaid << "\t" << endaid << ", at " << Simulator::Now () << ", bufferTimeToAllowBeaconToBeReceived " << bufferTimeToAllowBeaconToBeReceived);

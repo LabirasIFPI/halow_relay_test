@@ -50,154 +50,134 @@ Add current RawConfig information into file RawConfiglog.txt
 #include <utility> // std::pair
 #include <map>
 #include <iostream>
+#include <vector>
+#include <algorithm>
+#include <stdexcept>
+#include <cstdint>
 
 
 
 using namespace std;
 using namespace ns3;
 
-void RAWGroupping (uint16_t Numsta, uint16_t NGroups, uint16_t NumSlot, uint16_t trial, string RAWConfigPath, uint32_t beaconinterval, uint32_t pageSliceCount, uint32_t pageSliceLen)
+void RAWGroupping (uint32_t Numsta, uint32_t NGroups, uint32_t NumSlot,
+                   uint32_t trial, string RAWConfigPath,
+                   uint32_t beaconinterval, uint32_t pageSliceCount,
+                   uint32_t pageSliceLen)
 {
-    uint16_t NRawSta;
-    uint16_t NRawGroups;
-    uint16_t NstaPerRaw;
-    uint16_t NstaPerSlot;
+    (void) trial;
+    (void) pageSliceLen;
 
-
-    uint16_t RawControl = 0;
-    uint16_t SlotCrossBoundary = 1;
-    uint16_t SlotFormat = 1;
-    uint16_t SlotDurationCount = 829;
-    uint16_t SlotNum = 1;
-    uint16_t pageIndex = 0;
-    uint32_t aid_start = 0;
-    uint32_t aid_end = 0;
-    
-    NRawSta = Numsta;
-    NRawGroups = NGroups;
-    SlotNum = NumSlot;
-    SlotDurationCount = (beaconinterval/NGroups/(SlotNum) - 500)/120;
-    
-	if (Numsta < pageSliceLen * 64 && pageSliceCount != 0)
-	{
-		std::cerr << "All stations can fit to a single page slice. Too many page slices relative to the number of stations. Set PageSliceCount=0 PageSliceLength=1 or reduce Page Slice Length." << std::endl;
-		NS_ASSERT (pageSliceCount == 0);
-	}
-
-    ofstream newfile;
-    string filepath = RAWConfigPath;
-    newfile.open (filepath, ios::out | ios::trunc);
-    if (pageSliceCount == 0)
+    // AID 0 is reserved. The usable associated AIDs are 1..8191.
+    // Each RAW assignment carries a 2-bit page and 11-bit page-local AID range.
+    if (Numsta == 0 || Numsta > 8191)
     {
-     	newfile << 1 << "\n" << 1 << "\n";
-     	//newfile.close();
-     	//grouping
-     	aid_start = 1;
-
-     	NstaPerRaw = NRawSta/NRawGroups;
-     	NstaPerSlot = NstaPerRaw/SlotNum;
-
-     	if (SlotNum < 8)
-     	{
-     		SlotFormat = 1;
-     	}
-     	else
-     	{
-     		SlotFormat = 0;
-     	}
-
-     	for (uint16_t groupID = 1; groupID <= NRawGroups; groupID++)
-     	{
-     		aid_end = aid_start + NstaPerRaw - 1;
-     		NS_ASSERT (pageIndex * 2048 < aid_end && aid_end < (pageIndex + 1) * 2048);
-     		//newfile.open (filepath, ios::out | ios::app);
-     		newfile << RawControl << "\t" << SlotCrossBoundary << "\t" << SlotFormat << "\t" << SlotDurationCount << "\t" << SlotNum << "\t" << pageIndex << "\t" << aid_start << "\t" << aid_end << "\t" << "\n";
-     		//newfile.close();
-
-     		aid_start = aid_end + 1;
-     	}
+        throw std::runtime_error("NRawSta must be between 1 and 8191 (AID 0 is reserved).");
     }
-    else
+    if (NGroups == 0 || NumSlot == 0)
     {
-    	//newfile.open (filepath, ios::out | ios::trunc);
-    	newfile << pageSliceCount << "\n";
-    	//newfile.close();
-    	for (int timID = 0; timID < pageSliceCount; timID++)
-    	{
-        	std::cout << "tim num=" << timID << std::endl;
-    		newfile << NGroups << "\n";
+        throw std::runtime_error("NGroup and NumSlot must be greater than zero.");
+    }
+    if (pageSliceCount != 0)
+    {
+        throw std::runtime_error("This multi-page generator requires pageSliceCount=0. TIM page slicing is a separate configuration.");
+    }
 
-    		uint32_t endAidInTim;
-    		if (timID + 1 < pageSliceCount)
-    		{
-    			endAidInTim = (timID + 1) * pageSliceLen * 64 - 1;
-    		}
-    		else
-    		{
-    			endAidInTim = NRawSta;//(pageIndex + 1) * 2048 - 1;
-    		}
+    const uint32_t AID_PAGE_SIZE = 2048;
+    const uint32_t MAX_PAGE = 3;
+    const uint32_t firstPage = 0;
+    const uint32_t lastPage = (Numsta + AID_PAGE_SIZE) / AID_PAGE_SIZE;
+    const uint32_t SlotCrossBoundary = 1;
+    const uint32_t RawControl = 0;
+    const uint32_t SlotFormat = (NumSlot < 8) ? 1 : 0;
 
-    		std::cout << "NRawSTa=" << NRawSta << " endAidInTim=" << endAidInTim ;
-    		if (NRawSta > endAidInTim || timID + 1 != pageSliceCount)
-    		{
-    			NstaPerRaw = pageSliceLen * 64 / NRawGroups;
-    			if (timID == 0)
-    				NRawSta -= pageSliceLen * 64 - 1;
-    			else
-    				NRawSta -= pageSliceLen * 64;
-    		}
-    		else
-    		{
-    			NstaPerRaw = NRawSta / NRawGroups;
-    			//NRawSta = 0;
-    		}
-    		std::cout << " NstaPerRaw=" << NstaPerRaw << "NrawSTa-novo = " << NRawSta << std::endl;
-    		//NstaPerSlot = NstaPerRaw/SlotNum;
+    if ((SlotFormat == 1 && NumSlot >= 8) || (SlotFormat == 0 && NumSlot >= 64))
+    {
+        throw std::runtime_error("NumSlot is outside the encoding range supported by this RAW format.");
+    }
 
-    		//NstaPerRaw = (endAidInTim - aid_start + 1) / NRawGroups;
+    struct RawRange { uint32_t page, start, end; };
+    std::vector<RawRange> ranges;
+    uint32_t totalGroups = 0;
 
-    		if (SlotNum < 8)
-    		{
-    			SlotFormat = 1;
-    		}
-    		else
-    		{
-    			SlotFormat = 0;
-    		}
+    for (uint32_t page = firstPage; page < lastPage && page <= MAX_PAGE; ++page)
+    {
+        const uint32_t globalPageStart = (page == 0) ? 1 : page * AID_PAGE_SIZE;
+        const uint32_t globalPageEnd = std::min(Numsta, page * AID_PAGE_SIZE + AID_PAGE_SIZE - 1);
+        if (globalPageStart > globalPageEnd)
+        {
+            continue;
+        }
 
-    		for (uint16_t groupID = 1; groupID <= NRawGroups; groupID++)
-    		{
-    			aid_end = aid_start + NstaPerRaw - 1;
-    			std::cout << "RAWg=" << groupID << " start=" << aid_start << " end=" << aid_end <<std::endl;
+        const uint32_t pageStaCount = globalPageEnd - globalPageStart + 1;
+        const uint32_t groupsThisPage = std::min(NGroups, pageStaCount);
+        const uint32_t base = pageStaCount / groupsThisPage;
+        const uint32_t remainder = pageStaCount % groupsThisPage;
+        uint32_t globalStart = globalPageStart;
 
-    			NS_ASSERT (aid_end <= Numsta);
-    			//newfile.open (filepath, ios::out | ios::app);
-    			if (groupID == 1 && timID == 0) aid_start = 1;
-    			newfile << RawControl << "\t" << SlotCrossBoundary << "\t" << SlotFormat << "\t" << SlotDurationCount << "\t" << SlotNum << "\t" << pageIndex << "\t" << aid_start << "\t" << aid_end << "\t" << "\n";
-    			//newfile.close();
+        for (uint32_t group = 0; group < groupsThisPage; ++group)
+        {
+            const uint32_t count = base + (group < remainder ? 1 : 0);
+            const uint32_t globalEnd = globalStart + count - 1;
+            ranges.push_back({page, globalStart - page * AID_PAGE_SIZE,
+                              globalEnd - page * AID_PAGE_SIZE});
+            globalStart = globalEnd + 1;
+            ++totalGroups;
+        }
+    }
 
-    			aid_start = aid_end + 1;
-    		}
-    		//newfile.open (filepath, ios::out | ios::app);
-    		//newfile << "\n";
-    		//newfile.close();
-    	}
+    if (totalGroups == 0 || totalGroups > 42)
+    {
+        throw std::runtime_error("The generated RPS must contain 1..42 RAW assignments; reduce NGroup (maximum 42 assignments per RPS IE).");
+    }
+
+    // The total duration of all RAW groups must fit in the beacon interval.
+    const uint64_t slotBudget = beaconinterval / (uint64_t(totalGroups) * NumSlot);
+    if (slotBudget <= 500)
+    {
+        throw std::runtime_error("beaconinterval is too short for the requested number of RAW groups and slots.");
+    }
+    const uint64_t durationCount = (slotBudget - 500) / 120;
+    const uint64_t maxDurationCount = (SlotFormat == 1) ? 2047 : 255;
+    if (durationCount > maxDurationCount)
+    {
+        throw std::runtime_error("Calculated SlotDurationCount exceeds the selected RAW SlotFormat range.");
+    }
+
+    ofstream newfile(RAWConfigPath.c_str(), ios::out | ios::trunc);
+    if (!newfile.is_open())
+    {
+        throw std::runtime_error("Cannot open RAWConfigPath: " + RAWConfigPath);
+    }
+
+    // Config format: number of RPS entries, RAW assignments per RPS, then rows.
+    // One RPS advertises groups for all pages, so all 8191 valid AIDs are covered
+    // in the same beacon rather than rotating through only page 0.
+    newfile << 1 << "\n" << totalGroups << "\n";
+    for (const auto &r : ranges)
+    {
+        newfile << RawControl << "\t" << SlotCrossBoundary << "\t"
+                << SlotFormat << "\t" << durationCount << "\t" << NumSlot
+                << "\t" << r.page << "\t" << r.start << "\t" << r.end << "\n";
     }
     newfile.close();
+
+    std::cout << "RAW config generated: stations=" << Numsta
+              << ", pages=" << lastPage << ", RAW groups=" << totalGroups
+              << ", slots/group=" << NumSlot << ", SlotDurationCount="
+              << durationCount << std::endl;
 }
-
-
 
 
 int main (int argc, char *argv[])
 {
-  uint16_t NRawSta;
-  uint16_t NGroup;
-  uint16_t trial=0;
-  uint16_t NumSlot;
-  uint32_t beaconinterval;
+  uint32_t NRawSta = 0;
+  uint32_t NGroup = 0;
+  uint32_t trial=0;
+  uint32_t NumSlot = 0;
+  uint32_t beaconinterval = 0;
   string RAWConfigPath;
-  uint32_t pageSliceLen, pageSliceCount;
+  uint32_t pageSliceLen = 1, pageSliceCount = 0;
   CommandLine cmd;
   cmd.AddValue ("NRawSta", "number of stations supporting RAW", NRawSta);
   cmd.AddValue ("NGroup", "number of RAW groups", NGroup);
@@ -209,8 +189,19 @@ int main (int argc, char *argv[])
   cmd.AddValue ("pageSliceLen", "Number of blocks in each TIM for the associated page except the last TIM", pageSliceLen);
   cmd.Parse (argc,argv);
   
-  std::cout << "NRawSta=" << NRawSta <<  " NGroup=" << NGroup << " beaconinterval=" << beaconinterval << "RAWConfigPath=" << RAWConfigPath << "\n";    
-  RAWGroupping (NRawSta, NGroup, NumSlot, trial, RAWConfigPath, beaconinterval, pageSliceCount, pageSliceLen);
+  try
+  {
+    std::cout << "NRawSta=" << NRawSta << " NGroup=" << NGroup
+              << " NumSlot=" << NumSlot << " beaconinterval=" << beaconinterval
+              << " RAWConfigPath=" << RAWConfigPath << "\n";
+    RAWGroupping (NRawSta, NGroup, NumSlot, trial, RAWConfigPath,
+                  beaconinterval, pageSliceCount, pageSliceLen);
+  }
+  catch (const std::exception &e)
+  {
+    std::cerr << "RAW-generate error: " << e.what() << std::endl;
+    return 1;
+  }
     
   return 0;
 }

@@ -36,7 +36,7 @@ NUMSLOT="2"
 SIM_TIME="${SIM_TIME:-}"      # vazio = usa o default do simulador (ex.: SIM_TIME=30 ./run_halow.sh groups)
 
 # --- Bateria principal: Nsta x numero de grupos RAW ---
-NSTA_LIST="600 1200 2000"
+NSTA_LIST="625 1250 2500"
 GROUP_LIST="1 2 3 4"
 
 # --- Outras baterias (mantidas) ---
