@@ -101,6 +101,8 @@ public:
        };
     
   RPS ();
+  RPS (const RPS &other);
+  RPS &operator= (const RPS &other);
   ~RPS ();
  
    /**
