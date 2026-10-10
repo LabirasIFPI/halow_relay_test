@@ -333,8 +333,9 @@ void onSTAAssociated(int i) {
 	eventManager.onNodeAssociated(*nodes[i]);
 
 	// RPS, Raw group and RAW slot assignment
+	static bool trafficConfigured = false;
 
-	if (GetAssocNum() == config.Nsta) {
+	if (GetAssocNum() <= config.Nsta && !trafficConfigured) {
 		cout << "All " << AssocNum << " stations associated at " << Simulator::Now ().GetMicroSeconds () <<", configuring clients & server" << endl;
 
 		// association complete, start sending packets
@@ -365,6 +366,7 @@ void onSTAAssociated(int i) {
 		}
 		updateNodesQueueLength();
 	}
+	trafficConfigured = true;
 }
 
 void RpsIndexTrace(uint16_t oldValue, uint16_t newValue) {
@@ -1331,8 +1333,7 @@ int main(int argc, char *argv[]) {
 	mobilityAp.SetPositionAllocator(apAlloc);
 	mobilityAp.SetMobilityModel("ns3::ConstantPositionMobilityModel");
 	mobilityAp.Install(wifiApNode);
-
-	// STAs: matriz com Nsta+1 células (a 0,0 é o gateway)
+	
 	uint32_t cols = (uint32_t) std::ceil(std::sqrt((double)config.Nsta + 1));
 
 	Ptr<ListPositionAllocator> staAlloc = CreateObject<ListPositionAllocator>();
