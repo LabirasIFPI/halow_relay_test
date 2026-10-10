@@ -18,7 +18,7 @@
 set -u
 
 # ---------------- CONFIG ----------------
-SIM_PROJ="${SIM_PROJ:-halow-matrices-test}"   # programa do simulador (nome da pasta em scratch/)
+SIM_PROJ="${SIM_PROJ:-halow-ofc}"   # programa do simulador (nome da pasta em scratch/)
 RAW_PROJ="${RAW_PROJ:-RAW-generate}"          # gerador de RawConfig (nome e case-sensitive)
 
 RESULTS_DIR="${RESULTS_DIR:-results}"
@@ -36,7 +36,7 @@ NUMSLOT="2"
 SIM_TIME="${SIM_TIME:-}"      # vazio = usa o default do simulador (ex.: SIM_TIME=30 ./run_halow.sh groups)
 
 # --- Bateria principal: Nsta x numero de grupos RAW ---
-NSTA_LIST="625 1250 2500"
+NSTA_LIST="600 1200 2000"
 GROUP_LIST="1 2 3 4"
 
 # --- Outras baterias (mantidas) ---
