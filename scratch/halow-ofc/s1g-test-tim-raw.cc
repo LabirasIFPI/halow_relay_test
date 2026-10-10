@@ -1337,13 +1337,13 @@ int main(int argc, char *argv[]) {
 	uint32_t cols = (uint32_t) std::ceil(std::sqrt((double)config.Nsta + 1));
 
 	Ptr<ListPositionAllocator> staAlloc = CreateObject<ListPositionAllocator>();
-	uint32_t placed = 0;
-	for (uint32_t linha = 0; placed < config.Nsta; linha++) {
-		for (uint32_t coluna = 0; coluna < cols && placed < config.Nsta; coluna++) {
+	uint32_t flag = 0;
+	for (uint32_t linha = 0; flag < config.Nsta; linha++) {
+		for (uint32_t coluna = 0; coluna < cols && flag < config.Nsta; coluna++) {
 			if (linha == 0 && coluna == 0) continue;   // célula do gateway
 			staAlloc->Add(Vector(xpos + coluna * spacing,
 								ypos + linha * spacing, 0.0));
-			placed++;
+			flag++;
 		}
 	}
 

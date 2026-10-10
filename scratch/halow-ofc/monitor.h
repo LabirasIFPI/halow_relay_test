@@ -3,6 +3,9 @@
 
 // ============================================================
 // monitor.h - Sniffers de RSSI + pacotes IP para simulação 802.11ah
+// LQI_sim_PDR: índice experimental por fluxo = 100 * PDR.
+// LQI_sim_RSSI_SNR: proxy heurístico RSSI/SNR reescalado para 0..100.
+// Nenhum dos dois é um LQI PHY padronizado pelo IEEE 802.11ah.
 //   - Papel do nó: STA / AP / RELAY (relay = 2 devices: AP + STA)
 //   - RSSI de cada nó em relação ao AP central
 //   - Por pacote: fonteIP, destinoIP, delay, hops, tamanho, flowID
@@ -182,6 +185,7 @@ inline uint8_t CalcularQualidadeEnlace(double rssiDbm, double snrDb)
 {
     // Combinação igualmente ponderada de RSSI e SNR normalizados.
     // É um score heurístico de qualidade do enlace, NÃO um LQI PHY padronizado.
+    // Para comparar visualmente com LQI_sim_PDR, exportamos também score * 100 / 255.
     const double score = (RSSIparaQualidade(rssiDbm) + SNRparaQualidade(snrDb)) / 2.0;
     return static_cast<uint8_t>(score + 0.5);
 }
@@ -532,7 +536,7 @@ void ExportarAmostrasRadioCsv(const std::string& filename)
     std::ofstream out(filename.c_str());
     out << "time_s,receiver_node_id,receiver_role,receiver_device_index,receiver_interface,"
            "sender_node_id,sender_is_central_ap,rssi_dbm,noise_dbm,snr_db,"
-           "rssi_quality_proxy_0_255,snr_quality_proxy_0_255,link_quality_proxy_0_255,frame_size_bytes\n";
+           "rssi_quality_proxy_0_255,snr_quality_proxy_0_255,link_quality_proxy_0_255,link_quality_proxy_0_100,frame_size_bytes\n";
     for (const auto& r : g_rssiHistory) {
         out << r.time << "," << r.nodeId << "," << r.role << "," << r.deviceIndex << ","
             << r.ifaceType << ",";
@@ -540,7 +544,8 @@ void ExportarAmostrasRadioCsv(const std::string& filename)
         out << "," << (r.fromCentralAp ? 1 : 0) << "," << r.rssi << "," << r.noise << ","
             << r.snr << "," << static_cast<unsigned>(r.rssiQuality) << ","
             << static_cast<unsigned>(r.snrQuality) << ","
-            << static_cast<unsigned>(r.linkQuality) << "," << r.packetSize << "\n";
+            << static_cast<unsigned>(r.linkQuality) << ","
+            << (static_cast<double>(r.linkQuality) * 100.0 / 255.0) << "," << r.packetSize << "\n";
     }
 }
 
@@ -548,8 +553,8 @@ void ExportarResumoEnlaceApCsv(const std::string& filename)
 {
     std::ofstream out(filename.c_str());
     out << "node_id,role,distance_to_central_ap_m,"
-           "ap_rx_samples_from_node,ap_rx_rssi_mean_dbm,ap_rx_rssi_min_dbm,ap_rx_rssi_max_dbm,ap_rx_noise_mean_dbm,ap_rx_snr_mean_db,ap_rx_rssi_quality_proxy_mean,ap_rx_snr_quality_proxy_mean,ap_rx_link_quality_proxy_mean,"
-           "node_rx_samples_from_ap,node_rx_rssi_mean_dbm,node_rx_rssi_min_dbm,node_rx_rssi_max_dbm,node_rx_noise_mean_dbm,node_rx_snr_mean_db,node_rx_rssi_quality_proxy_mean,node_rx_snr_quality_proxy_mean,node_rx_link_quality_proxy_mean\n";
+           "ap_rx_samples_from_node,ap_rx_rssi_mean_dbm,ap_rx_rssi_min_dbm,ap_rx_rssi_max_dbm,ap_rx_noise_mean_dbm,ap_rx_snr_mean_db,ap_rx_rssi_quality_proxy_mean_0_255,ap_rx_snr_quality_proxy_mean_0_255,ap_rx_link_quality_proxy_mean_0_255,ap_rx_link_quality_proxy_mean_0_100,"
+           "node_rx_samples_from_ap,node_rx_rssi_mean_dbm,node_rx_rssi_min_dbm,node_rx_rssi_max_dbm,node_rx_noise_mean_dbm,node_rx_snr_mean_db,node_rx_rssi_quality_proxy_mean_0_255,node_rx_snr_quality_proxy_mean_0_255,node_rx_link_quality_proxy_mean_0_255,node_rx_link_quality_proxy_mean_0_100\n";
     for (const auto& role : g_nodeRole) {
         const uint32_t id = role.first;
         if (id == g_centralApId) continue;
@@ -560,8 +565,8 @@ void ExportarResumoEnlaceApCsv(const std::string& filename)
             out << a.n << "," << a.rssiSum/a.n << "," << a.rssiMin << "," << a.rssiMax << ","
                 << a.noiseSum/a.n << "," << a.snrSum/a.n << ","
                 << a.rssiQualitySum/a.n << "," << a.snrQualitySum/a.n << ","
-                << a.linkQualitySum/a.n;
-        } else out << ",,,,,,,,";
+                << a.linkQualitySum/a.n << "," << (a.linkQualitySum/a.n) * 100.0 / 255.0;
+        } else out << ",,,,,,,,,";
         out << ",";
         auto down = g_nodeRxFromAp.find(id);
         if (down != g_nodeRxFromAp.end() && down->second.n) {
@@ -569,8 +574,8 @@ void ExportarResumoEnlaceApCsv(const std::string& filename)
             out << d.n << "," << d.rssiSum/d.n << "," << d.rssiMin << "," << d.rssiMax << ","
                 << d.noiseSum/d.n << "," << d.snrSum/d.n << ","
                 << d.rssiQualitySum/d.n << "," << d.snrQualitySum/d.n << ","
-                << d.linkQualitySum/d.n;
-        } else out << ",,,,,,,,";
+                << d.linkQualitySum/d.n << "," << (d.linkQualitySum/d.n) * 100.0 / 255.0;
+        } else out << ",,,,,,,,,";
         out << "\n";
     }
 }
@@ -600,12 +605,17 @@ void ExportarResumoFluxosCsv(const std::string& filename)
     std::ofstream out(filename.c_str());
     out << "flow_id,source_ip,destination_ip,source_node_id,destination_node_id,ip_protocol,"
            "source_port,destination_port,origin_tx_packets,destination_delivered_packets,"
-           "origin_tx_bytes,destination_delivered_bytes,estimated_loss_pct,mean_one_way_delay_s,"
+           "origin_tx_bytes,destination_delivered_bytes,estimated_loss_pct,pdr_ratio,lqi_sim_pdr_0_100,mean_one_way_delay_s,"
            "mean_ip_router_hops_from_ttl,observed_duration_s,goodput_kbit_s,first_tx_s,last_delivery_s\n";
     for (const auto& kv : g_flows) {
         const FlowStats& f = kv.second;
         const double loss = f.txPackets ? 100.0 *
             static_cast<double>(f.txPackets > f.rxPackets ? f.txPackets - f.rxPackets : 0) / f.txPackets : -1.0;
+        // PDR = pacotes unicos entregues / pacotes originados. Limitamos a 1.0
+        // para que duplicatas/inconsistencias de contagem nunca gerem LQI_sim > 100.
+        const uint64_t deliveredForPdr = f.rxPackets > f.txPackets ? f.txPackets : f.rxPackets;
+        const double pdr = f.txPackets ? static_cast<double>(deliveredForPdr) / f.txPackets : -1.0;
+        const double lqiSim = pdr >= 0.0 ? 100.0 * pdr : -1.0;
         const double mdel = f.rxPackets ? f.delaySum / f.rxPackets : -1.0;
         const double mhops = f.rxPackets ? f.hopsSum / f.rxPackets : -1.0;
         const double dur = (f.rxPackets && f.lastRx > f.firstTx && f.firstTx >= 0) ? f.lastRx - f.firstTx : -1.0;
@@ -615,6 +625,8 @@ void ExportarResumoFluxosCsv(const std::string& filename)
             << static_cast<unsigned>(f.proto) << "," << f.srcPort << "," << f.dstPort << ","
             << f.txPackets << "," << f.rxPackets << "," << f.txBytes << "," << f.rxBytes << ",";
         if (loss >= 0) out << loss;
+        out << ","; if (pdr >= 0) out << pdr;
+        out << ","; if (lqiSim >= 0) out << lqiSim;
         out << ","; if (mdel >= 0) out << mdel;
         out << ","; if (mhops >= 0) out << mhops;
         out << ","; if (dur >= 0) out << dur;
@@ -683,6 +695,9 @@ void ExportarResumoSimulacaoCsv(const std::string& filename, double simTime)
     const double appRate = simTime > 0 ? deliveredBytes * 8.0 / simTime / 1000.0 : 0.0;
     const double flowLoss = flowTxPackets ? 100.0 *
         static_cast<double>(flowTxPackets > flowDeliveredPackets ? flowTxPackets - flowDeliveredPackets : 0) / flowTxPackets : -1.0;
+    const uint64_t deliveredForPdr = flowDeliveredPackets > flowTxPackets ? flowTxPackets : flowDeliveredPackets;
+    const double flowPdr = flowTxPackets ? static_cast<double>(deliveredForPdr) / flowTxPackets : -1.0;
+    const double lqiSim = flowPdr >= 0.0 ? 100.0 * flowPdr : -1.0;
     out << "metric,value,unit,definition\n";
     out << "simulation_duration_used_for_rates," << simTime << ",s,Duration used as denominator for node delivery rates\n";
     out << "last_observed_ip_event_time," << lastIpEvent << ",s,Latest timestamp in recorded IP events; not necessarily simulator stop time\n";
@@ -702,6 +717,12 @@ void ExportarResumoSimulacaoCsv(const std::string& filename, double simTime)
     out << "estimated_flow_packet_loss_pct,";
     if (flowLoss >= 0) out << flowLoss;
     out << ",percent,Approximation from per-flow origin TX versus matched destination LocalDeliver; unmatched events may affect accuracy\n";
+    out << "flow_pdr_ratio,";
+    if (flowPdr >= 0) out << flowPdr;
+    out << ",ratio,Matched destination deliveries divided by origin TX packets across observed flows\n";
+    out << "lqi_sim_pdr_0_100,";
+    if (lqiSim >= 0) out << lqiSim;
+    out << ",score_0_to_100,Experimental index calculated as 100 times flow PDR; not standardized IEEE 802.11ah LQI\n";
     out << "estimated_flow_tx_bytes," << flowTxBytes << ",bytes,Origin TX bytes counted per flow\n";
     out << "estimated_flow_delivered_bytes," << flowDeliveredBytes << ",bytes,Matched destination delivery bytes counted per flow\n";
     out << "estimated_ip_tx_energy," << txEnergy << ",J,Model estimate using IP bytes nominal rate and assumed TX power; not PHY energy\n";
