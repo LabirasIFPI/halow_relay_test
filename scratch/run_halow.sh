@@ -2,7 +2,7 @@
 # ============================================================
 # run_halow.sh — Bateria automatizada HaLow (ns-3)
 #
-# Uso:  ./scratch/run_halow.sh {groups|n|slot|seed|custom|show|reset}
+# Uso:  ./scratch/run_halow.sh {groups|2500|n|slot|seed|custom|show|reset}
 #       (rode da raiz do projeto, onde fica o ./waf)
 #
 # Cada simulacao gera uma pasta propria em results/:
@@ -38,6 +38,9 @@ SIM_TIME="${SIM_TIME:-}"      # vazio = usa o default do simulador (ex.: SIM_TIM
 # --- Bateria principal: Nsta x numero de grupos RAW ---
 NSTA_LIST="625 1250 2500"
 GROUP_LIST="1 2 3 4"
+# Bateria focada em 2500 STAs: cruza grupos RAW (1..4) com slots por grupo (1..4).
+N2500_GROUP_LIST="1 2 3 4"
+N2500_SLOT_LIST="1 2 3 4"
 
 # --- Outras baterias (mantidas) ---
 SEED_LIST="1 2 3"
@@ -81,7 +84,8 @@ ngroup_for() {
 gen_rawconfig() {
     local nsta="$1" slotnum="$2" ngroup="$3" tag="$4"
     RAWPATH="${RAWDIR}/RawConfig-N${nsta}-G${ngroup}-S${slotnum}.txt"
-    local genlog="${RAWDIR}/rawgen-N${nsta}-G${ngroup}-S${slotnum}.log"
+    RAWGENLOG="${RAWDIR}/rawgen-N${nsta}-G${ngroup}-S${slotnum}.log"
+    local genlog="$RAWGENLOG"
 
     rm -f "$RAWPATH"
 
@@ -97,6 +101,36 @@ gen_rawconfig() {
 
     if [ ! -s "$RAWPATH" ]; then
         echo "     x raw-generate falhou (ver $genlog)"
+        return 1
+    fi
+    return 0
+}
+
+
+# Verifica que o RawConfig cobre exatamente os AIDs esperados, sem intervalos
+# inválidos ou repetidos, antes de iniciar uma simulação cara.
+validate_rawconfig() {
+    local path="$1" expected="$2" logpath="$3"
+    if ! awk -v expected="$expected" '
+        NR == 1 { rps = $1; next }
+        NR == 2 { declaredGroups = $1; next }
+        NR >= 3 {
+            if (NF < 8) { bad = 1; next }
+            page = $6; start = $7; finish = $8
+            if (page < 0 || page > 3 || start < 0 || finish > 2047 || start > finish) bad = 1
+            if (page == 0 && start < 1) bad = 1
+            count++
+            total += finish - start + 1
+            for (localAid = start; localAid <= finish; localAid++) {
+                globalAid = page * 2048 + localAid
+                if (globalAid < 1 || globalAid > 8191 || seen[globalAid]++) bad = 1
+            }
+        }
+        END {
+            if (rps != 1 || count != declaredGroups || count < 1 || count > 42 || total != expected || bad) exit 1
+        }
+    ' "$path"; then
+        echo "     x RawConfig inválido: cobertura RAW não corresponde a ${expected} STAs (ver $logpath)"
         return 1
     fi
     return 0
@@ -124,10 +158,34 @@ clean_stale_csvs() {
 }
 
 run_test() {
-    local tag="$1" nsta="$2" slotnum="$3" ngroup="$4" extra_args="$5"
-
+    local tag="$1" requested_nsta="$2" slotnum="$3" ngroup="$4" extra_args="$5"
+    local nsta="$requested_nsta" remainder=0 adjustment=""
     local id folder safe_tag status="ok"
+
+    # Garante divisibilidade: aumenta a quantidade solicitada até o próximo
+    # múltiplo de NGroup conforme solicitado; o gerador multi-página também distribui restos por página.
+    if [ "$ngroup" -le 0 ]; then
+        echo "     x NGroup precisa ser maior que zero (recebido: $ngroup)"
+        return 1
+    fi
+    remainder=$((nsta % ngroup))
+    if [ "$remainder" -ne 0 ]; then
+        nsta=$((nsta + ngroup - remainder))
+        adjustment="Nsta solicitado=${requested_nsta}; ajustado para ${nsta} para ser divisível por NGroup=${ngroup}."
+        echo "     ! $adjustment"
+    fi
+    if [ "$nsta" -lt 1 ] || [ "$nsta" -gt 8191 ]; then
+        echo "     x Nsta usado=${nsta} fora do intervalo suportado (1..8191 AIDs válidos)."
+        return 1
+    fi
+    if [ "$ngroup" -gt 42 ]; then
+        echo "     x NGroup=$ngroup pode exceder o limite de 42 atribuições RAW por RPS."
+        return 1
+    fi
     id=$(next_id)
+    if [ "$nsta" != "$requested_nsta" ]; then
+        tag="${tag}-usadoN${nsta}"
+    fi
     safe_tag=$(printf '%s' "$tag" | sed 's/[^A-Za-z0-9_.-]/_/g')
     folder="${RESULTS_DIR}/$(printf '%02d' "$id")_${safe_tag}"
     if [ -e "$folder" ]; then
@@ -138,18 +196,21 @@ run_test() {
     printf "[%02d] %-22s Nsta=%-5s NGroup=%s NumSlot=%s\n" \
            "$id" "$tag" "$nsta" "$ngroup" "$slotnum"
 
-    # ---- avisos de configuracao (nao interrompem) ----
-    local warns=""
-    if [ $((nsta % ngroup)) -ne 0 ]; then
-        warns="${warns}Nsta=${nsta} nao e divisivel por NGroup=${ngroup}: $((nsta % ngroup)) STAs ficam fora dos grupos RAW. "
-    fi
+    # ---- avisos informativos ----
+    local warns="${adjustment}"
     if [ "$nsta" -gt 2047 ]; then
-        warns="${warns}Nsta=${nsta} > 2047: AIDs passam do limite da pagina 0 (o RAW-generate tem NS_ASSERT nisso em build debug). "
+        warns="${warns}AIDs distribuídos por múltiplas páginas (0..3); exige gerador e AP com suporte multi-página. "
     fi
     [ -n "$warns" ] && echo "     ! $warns"
 
     if ! gen_rawconfig "$nsta" "$slotnum" "$ngroup" "$tag"; then
         status="falha_raw"
+        echo "${id},${BATCH_ID},\"${tag}\",${nsta},${ngroup},${slotnum},${status},\"\",${folder}" >> "$MANIFEST"
+        return
+    fi
+    if ! validate_rawconfig "$RAWPATH" "$nsta" "$RAWGENLOG"; then
+        status="falha_validacao_raw"
+        cp "$RAWPATH" "${folder}/RawConfig.txt"
         echo "${id},${BATCH_ID},\"${tag}\",${nsta},${ngroup},${slotnum},${status},\"\",${folder}" >> "$MANIFEST"
         return
     fi
@@ -165,7 +226,8 @@ run_test() {
         echo "id=${id}"
         echo "batch=${BATCH_ID}"
         echo "tag=${tag}"
-        echo "nsta=${nsta}"
+        echo "nsta_requested=${requested_nsta}"
+        echo "nsta_used=${nsta}"
         echo "ngroup=${ngroup}"
         echo "numslot=${slotnum}"
         echo "comando=./waf --run \"${SIM_PROJ} ${sim_args}\""
@@ -179,6 +241,20 @@ run_test() {
     if ! ./waf --run "$SIM_PROJ $sim_args" > "${folder}/sim.log" 2>&1; then
         status="falha_sim"
         echo "     x simulacao falhou (ver ${folder}/sim.log)"
+    elif grep -q "cannot send since not associated" "${folder}/sim.log"; then
+        status="associacao_incompleta"
+        echo "     ! houve tentativa de envio por STA não associada; confira ${folder}/sim.log"
+    fi
+
+    # A mensagem atual do simulador informa a quantidade observada no momento
+    # em que iniciou o tráfego; se for menor que Nsta, registra o caso como incompleto.
+    if [ "$status" = "ok" ]; then
+        local assoc_count
+        assoc_count=$(grep -Eo 'All [0-9]+ stations associated' "${folder}/sim.log" | tail -1 | awk '{print $2}')
+        if [ -n "$assoc_count" ] && [ "$assoc_count" -lt "$nsta" ]; then
+            status="associacao_incompleta"
+            echo "     ! simulador iniciou o tráfego com ${assoc_count}/${nsta} STAs associadas (ver ${folder}/sim.log)"
+        fi
     fi
 
     # CSVs (mesmo em falha parcial, guarda o que existir)
@@ -232,6 +308,17 @@ sweep_slotnum() {
     done
 }
 
+# Bateria solicitada: 2500 STAs em várias configurações RAW.
+# Para NGroup=3, ajusta automaticamente 2500 -> 2502 para manter divisibilidade.
+sweep_2500() {
+    local G SN
+    for G in $N2500_GROUP_LIST; do
+        for SN in $N2500_SLOT_LIST; do
+            run_test "N2500-G${G}-S${SN}" "2500" "$SN" "$G" ""
+        done
+    done
+}
+
 sweep_seed() {
     local S
     for S in $SEED_LIST; do
@@ -278,6 +365,7 @@ start_batch() {
 
 case "${1:-help}" in
     groups)   start_batch; sweep_groups ;;
+    2500|n2500) start_batch; sweep_2500 ;;
     n)        start_batch; sweep_n ;;
     slot|raw) start_batch; sweep_slotnum ;;
     seed)     start_batch; sweep_seed ;;
@@ -285,7 +373,8 @@ case "${1:-help}" in
     show)     show_manifest ;;
     reset)    reset_all ;;
     *)
-        echo "Uso: $0 {groups|n|slot|raw|seed|custom|show|reset}"
+        echo "Uso: $0 {groups|2500|n|slot|raw|seed|custom|show|reset}"
         echo "  groups  Nsta {${NSTA_LIST}} x grupos RAW {${GROUP_LIST}}  (principal)"
+        echo "  2500    2500 STAs x NGroup {${N2500_GROUP_LIST}} x slots {${N2500_SLOT_LIST}} (16 simulações)"
         ;;
 esac
