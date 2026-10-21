@@ -335,21 +335,19 @@ void onSTAAssociated(int i) {
 	cout << "Node " << std::to_string(i) << " is associated and has aid "
 			<< nodes[i]->aId << endl;
 
-	for (int k = 0; k < config.rps.rpsset.size(); k++) {
-		for (int j = 0; j < config.rps.rpsset[k]->GetNumberOfRawGroups(); j++) {
-			if (config.rps.rpsset[k]->GetRawAssigmentObj(j).GetRawGroupAIDStart()
-					<= i + 1
-					&& i + 1
-							<= config.rps.rpsset[k]->GetRawAssigmentObj(j).GetRawGroupAIDEnd()) {
+	// RAW do nó: o MAC escolhe o grupo por (AID & 0x7ff) dentro de [AIDStart, AIDEnd]
+	// e o slot por (AID & 0x7ff) % slotNum (ver StaWifiMac). Usa o AID real, não o índice.
+	const int aid = nodes[i]->aId;
+	for (int k = 0; k < (int) config.rps.rpsset.size(); k++) {
+		for (int j = 0; j < (int) config.rps.rpsset[k]->GetNumberOfRawGroups(); j++) {
+			auto raw = config.rps.rpsset[k]->GetRawAssigmentObj(j);
+			if (raw.GetRawGroupAIDStart() <= (aid & 0x07ff)
+					&& (aid & 0x07ff) <= raw.GetRawGroupAIDEnd()) {
 				nodes[i]->rpsIndex = k + 1;
 				nodes[i]->rawGroupNumber = j + 1;
-				nodes[i]->rawSlotIndex =
-						nodes[i]->aId
-								% config.rps.rpsset[k]->GetRawAssigmentObj(j).GetSlotNum()
-								+ 1;
-				/*cout << "Node " << i << " with AID " << (int)nodes[i]->aId << " belongs to " << (int)nodes[i]->rawSlotIndex << " slot of RAW group "
-				 << (int)nodes[i]->rawGroupNumber << " within the " << (int)nodes[i]->rpsIndex << " RPS." << endl;
-				 */
+				nodes[i]->rawSlotIndex = (aid & 0x07ff) % raw.GetSlotNum() + 1;
+				RegistrarRawDoNo(wifiStaNode.Get(i)->GetId(), aid,
+						k + 1, j + 1, nodes[i]->rawSlotIndex);
 			}
 		}
 	}

@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
 """
 Calibra um LQI (0-100) a partir do PDR por enlace medido no ns-3.
-
-Entrada: arquivos <prefixo>_link_frame_summary.csv exportados pelo monitor.h.
-  1. Calibração (uma ou mais rodadas): monta a curva SNR de uplink -> PDR por enlace.
-     - PDR por enlace = quadros decodificados no AP / quadros enviados ao AP.
-     - Rodadas diferentes são somadas quadro a quadro (mais amostras por SNR).
-     - Curva monótona (mais SNR nunca piora o PDR), ponderada pelo nº de quadros.
-     - Normalizada pelo patamar dos enlaces bons: a perda por disputa do canal
-       depende da carga da rede, não do enlace, e afeta todos os nós igualmente.
-  2. Teste (uma ou mais rodadas): aplica a curva ao SNR de cada enlace e compara o
-     LQI calibrado com o proxy antigo (RSSI/SNR) e com o PDR medido no teste.
-
-Uso:
-  python calibrar_lqi.py --calibracao c1.csv [c2.csv ...] --teste t1.csv [t2.csv ...]
-                         [--saida pasta]
+  
 """
 import argparse
 import csv
