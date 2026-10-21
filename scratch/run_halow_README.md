@@ -104,7 +104,7 @@ Variáveis configuradas no início do script:
 | `NUMSLOT` | `2` | Slots por RAW para baterias que não variam slots |
 | `BEACON` | `102400` | Beacon interval em microssegundos |
 | `PAGESLICE_COUNT` | `0` | Esta versão do gerador multi-página exige `0` |
-| `PAGESLICE_LEN` | `1` | Comprimento de page slice passado ao gerador |
+| `PAGESLICE_LEN` | `31` | Blocos anunciados no TIM do beacon. Com `1`, só os AIDs 1..63 eram anunciados e as STAs com AID >= 64 perdiam o downlink (eco). `31` cobre os AIDs 1..~1983 |
 | `SEED_LIST` | `1 2 3` | Sementes da bateria `seed` |
 | `SLOTNUM_LIST` | `1 2 3 4` | Slots da bateria `slot` |
 | `NGROUP_MAP` | `1:1 2:1 4:1 8:2 16:2 32:4 64:4` | Mapa usado por `n` e `slot` |

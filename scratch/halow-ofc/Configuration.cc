@@ -37,6 +37,27 @@ Configuration::Configuration(int argc, char *argv[]) {
     cmd.AddValue("TrafficInterval", "Traffic interval time in ms", trafficInterval);
     cmd.AddValue("Outputpath", "files path of each stations", OutputPath);
     cmd.AddValue("Nsta","Numbers of relays in simulation",Nsta);
+    cmd.AddValue("Spacing", "Distance between grid cells in meters", gridSpacing);
+    cmd.AddValue("Topology", "grid (matrix from the gateway, uses Nsta) or area (AreaSize x AreaSize grid, gateway at bottom-right corner)", topology);
+    cmd.AddValue("AreaSize", "Side of the square area in meters (Topology=area)", areaSize);
+    cmd.AddValue("Relays", "Topology=area without RelayPositions: 1 = one relay at the center, 0 = gateway only", numRelays);
+    cmd.AddValue("RelayPositions", "Topology=area: fixed relay positions \"x1,y1;x2,y2;...\" in meters (nearest grid node becomes relay)", relayPositions);
+    cmd.AddValue("LqiCurveFile", "curva_lqi.csv from calibrar_lqi.py, used to validate links and pick each node's parent", lqiCurveFile);
+    cmd.AddValue("MinLqiParent", "Minimum predicted LQI (0-100) for a valid parent link (with LqiCurveFile)", minLqiParent);
+    cmd.AddValue("MinSnrParent", "Minimum predicted uplink SNR (dB) for a valid parent link (without LqiCurveFile)", minSnrParent);
+    cmd.AddValue("ParentPreference", "saltos = fewest hops to the gateway first (then LQI, SNR); sinal = best LQI/SNR regardless of hops", parentPreference);
+    cmd.AddValue("RelayStaQueueMaxPackets", "Max packets in the STA-side (uplink) data queue of relays (scenario default 10)", relayStaQueueMaxPackets);
+    cmd.AddValue("TraceAccessNode", "STA index whose channel-access events are written to resultado_access_trace.csv (-1 = off)", traceAccessNode);
+    cmd.AddValue("RelayStaRawExempt", "If true, RAW does not restrict channel access of the STA side of relays", relayStaRawExempt);
+    cmd.AddValue("RelayStaPowerSave", "If false, the STA side of relays never sleeps", relayStaPowerSave);
+    cmd.AddValue("RelayApQueueMaxDelay", "Max time (ms) a data packet waits in a relay AP queue before being dropped (ns-3 default 500)", relayApQueueMaxDelayMs);
+    cmd.AddValue("GatewayApQueueMaxPackets", "Max packets in the gateway AP data queue (scenario default 10)", gatewayApQueueMaxPackets);
+    cmd.AddValue("RelayApQueueMaxPackets", "Max packets in a relay AP data queue (ns-3 default 400)", relayApQueueMaxPackets);
+    cmd.AddValue("MaxChildren", "Maximum children per AP (gateway or relay); 0 = unlimited", maxChildren);
+    cmd.AddValue("APTxPower", "AP transmit power in dBm (30 = original, 0 = symmetric link with the STAs)", apTxPowerDbm);
+    cmd.AddValue("MinBeaconRssiForAssoc", "STA only associates if the beacon arrives at or above this power in dBm (-1000 = off)", minBeaconRssiForAssoc);
+    cmd.AddValue("MonitorRadioSamples", "Keep every received frame in memory and export radio_rx_samples.csv", monitorRadioSamples);
+    cmd.AddValue("MonitorPacketRecords", "Keep every IP event in memory and export ip_packet_events.csv", monitorPacketRecords);
 
 /*
     cmd.AddValue("SlotFormat", "format of NRawSlotCount, -1 will auto calculate based on raw slot num", SlotFormat);

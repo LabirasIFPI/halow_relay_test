@@ -105,6 +105,12 @@ public:
    */
   uint32_t GetAID (void) const;
 
+  /**
+   * Also listens to the PHY sniffer to learn the received power of beacons,
+   * used by the MinBeaconRssiForAssoc association gate.
+   */
+  virtual void SetWifiPhy (Ptr<WifiPhy> phy);
+
     /*void SetPageSlicingSupported (uint8_t support);
     uint8_t GetPageSlicingSupported (void) const;*/
 private:
@@ -277,6 +283,25 @@ private:
   EventId m_beaconWatchdog;
   Time m_beaconWatchdogEnd;
   uint32_t m_maxMissedBeacons;
+  /*
+   * Association gate: with an asymmetric link (AP louder than the STA) a STA
+   * can hear the beacon but never be heard back, and would retry association
+   * forever. The STA only (re)tries to associate while the last beacon was
+   * received at or above m_minBeaconRssiDbm (-1000 dBm = disabled).
+   */
+  void OnPhyRxSniff (Ptr<const Packet> packet, uint16_t channelFreqMhz,
+                     uint16_t channelNumber, uint32_t rate, bool isShortPreamble,
+                     WifiTxVector txVector, double signalDbm, double noiseDbm);
+  bool IsLastBeaconStrongEnough (void) const;
+  double m_minBeaconRssiDbm;
+  // false = o rádio desta STA nunca dorme (ex.: lado STA de um relay, que recebe
+  // a descida de todos os nós abaixo dele e costuma ser ligado na energia)
+  bool m_powerSaveEnabled;
+  // true = o RAW nunca bloqueia o acesso desta STA (ex.: lado STA de um relay,
+  // que precisa escoar a subida de muitos nós e não cabe no slot de um sensor)
+  bool m_rawExempt;
+  double m_lastRxSignalDbm;
+  double m_lastBeaconRssiDbm;
   uint32_t m_aid;
   bool fasTAssocType;
   uint16_t fastAssocThreshold;

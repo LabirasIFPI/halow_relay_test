@@ -26,6 +26,7 @@
 #include "ns3/string.h"
 #include "ns3/pointer.h"
 #include "ns3/boolean.h"
+#include "ns3/double.h"
 #include "ns3/trace-source-accessor.h"
 #include "qos-tag.h"
 #include "mac-low.h"
@@ -96,6 +97,22 @@ StaWifiMac::GetTypeId (void)
                    UintegerValue (10),
                    MakeUintegerAccessor (&StaWifiMac::m_maxMissedBeacons),
                    MakeUintegerChecker<uint32_t> ())
+    .AddAttribute ("MinBeaconRssiForAssoc",
+                   "Minimum received power (dBm) of the AP beacon for the station to "
+                   "send or retry association requests. -1000 disables the gate.",
+                   DoubleValue (-1000.0),
+                   MakeDoubleAccessor (&StaWifiMac::m_minBeaconRssiDbm),
+                   MakeDoubleChecker<double> ())
+    .AddAttribute ("PowerSaveEnabled",
+                   "If false, the station radio never enters sleep mode (e.g. the STA side of a relay).",
+                   BooleanValue (true),
+                   MakeBooleanAccessor (&StaWifiMac::m_powerSaveEnabled),
+                   MakeBooleanChecker ())
+    .AddAttribute ("RawExempt",
+                   "If true, RAW never blocks channel access of this station (e.g. the STA side of a relay).",
+                   BooleanValue (false),
+                   MakeBooleanAccessor (&StaWifiMac::m_rawExempt),
+                   MakeBooleanChecker ())
     .AddAttribute ("StaType",
                    "Type of station, '1' sensor, '2' offload station ",
                    UintegerValue (1),
@@ -146,6 +163,11 @@ StaWifiMac::StaWifiMac ()
   m_rawStart = false;
   m_dataBuffered = false;
   m_aid = 8192;
+  m_minBeaconRssiDbm = -1000.0;
+  m_powerSaveEnabled = true;
+  m_rawExempt = false;
+  m_lastRxSignalDbm = -1000.0;
+  m_lastBeaconRssiDbm = -1000.0;
   uint32_t cwmin = 15;
   uint32_t cwmax = 1023;
   m_pspollDca = CreateObject<DcaTxop> ();
@@ -666,7 +688,7 @@ void StaWifiMac::GoToSleep (Time sleeptime)
 		{
 			NS_LOG_DEBUG(
 					"At " << Simulator::Now().GetSeconds() << " s AID " << this->GetAID() << " switches to SLEEP. Schedule wake-up after " << sleeptime.GetMicroSeconds() << " us.");
-			m_low->GetPhy()->SetSleepMode();
+			if (m_powerSaveEnabled) m_low->GetPhy()->SetSleepMode();
 			Simulator::Schedule(sleeptime, &StaWifiMac::WakeUp, this);
 			//std::cout << "+++At " << Simulator::Now().GetMicroSeconds() << "us: GoToSleep:" << sleeptime.GetMicroSeconds() << " FULL" << std::endl;
 
@@ -694,7 +716,7 @@ StaWifiMac::GoToSleepBinary (int value)
             //if(!outsideraw && !stationrawslot && !waitingack)
             if(!waitingack)
             {
-                m_low->GetPhy()->SetSleepMode();
+                if (m_powerSaveEnabled) m_low->GetPhy()->SetSleepMode();
                 //NS_LOG_UNCOND (m_low->GetAddress() << " sleepok. not wating ack");
             }
             else if (waitingack && (outsideraw || stationrawslot))
@@ -708,7 +730,7 @@ StaWifiMac::GoToSleepBinary (int value)
         }
         else if ( value == 1)
          {
-             m_low->GetPhy()->SetSleepMode();
+             if (m_powerSaveEnabled) m_low->GetPhy()->SetSleepMode();
             //NS_LOG_UNCOND (m_low->GetAddress() << " go to sleep after beacon received");
          }
      }
@@ -724,19 +746,19 @@ StaWifiMac::SleepIfQueueIsEmpty(bool value)
          if(!HasPacketsInQueue() && !waitingack)
 
             {
-                m_low->GetPhy()->SetSleepMode();
+                if (m_powerSaveEnabled) m_low->GetPhy()->SetSleepMode();
             }
             
          if(HasPacketsInQueue() && !waitingack && !outsideraw && !stationrawslot)
 
             {
-                m_low->GetPhy()->SetSleepMode();
+                if (m_powerSaveEnabled) m_low->GetPhy()->SetSleepMode();
             }
             
          //if (waitingack && !outsideraw && !stationrawslot)
          if (!outsideraw && !stationrawslot)
             {
-                m_low->GetPhy()->SetSleepMode();
+                if (m_powerSaveEnabled) m_low->GetPhy()->SetSleepMode();
             }
             
          if (waitingack && (outsideraw || stationrawslot))
@@ -846,12 +868,12 @@ StaWifiMac::RawSlotStartBackoffPostpone (void)
 void
 StaWifiMac::InsideBackoff (void)
 {
-   m_pspollDca->AccessAllowedIfRaw (false);
-   m_dca->AccessAllowedIfRaw (false);
-   m_edca.find (AC_VO)->second->AccessAllowedIfRaw (false);
-   m_edca.find (AC_VI)->second->AccessAllowedIfRaw (false);
-   m_edca.find (AC_BE)->second->AccessAllowedIfRaw (false);
-   m_edca.find (AC_BK)->second->AccessAllowedIfRaw (false);
+   m_pspollDca->AccessAllowedIfRaw (m_rawExempt);
+   m_dca->AccessAllowedIfRaw (m_rawExempt);
+   m_edca.find (AC_VO)->second->AccessAllowedIfRaw (m_rawExempt);
+   m_edca.find (AC_VI)->second->AccessAllowedIfRaw (m_rawExempt);
+   m_edca.find (AC_BE)->second->AccessAllowedIfRaw (m_rawExempt);
+   m_edca.find (AC_BK)->second->AccessAllowedIfRaw (m_rawExempt);
    //go to sleep at the end of raw slot
    stationrawslot = false;
    //NS_LOG_UNCOND ( m_low->GetAddress () << " Go to sleep at end of RAW slot " << Simulator::Now().GetSeconds());
@@ -1133,8 +1155,39 @@ void
 StaWifiMac::AssocRequestTimeout (void)
 {
   NS_LOG_FUNCTION (this);
+  if (!IsLastBeaconStrongEnough ())
+    {
+      // Beacon too weak for the AP to hear us back: stop retrying and wait
+      // for a stronger beacon (Receive restarts association from BEACON_MISSED).
+      SetState (BEACON_MISSED);
+      return;
+    }
   SetState (WAIT_ASSOC_RESP);
   SendAssociationRequest ();
+}
+
+void
+StaWifiMac::SetWifiPhy (Ptr<WifiPhy> phy)
+{
+  RegularWifiMac::SetWifiPhy (phy);
+  phy->TraceConnectWithoutContext ("MonitorSnifferRx",
+                                   MakeCallback (&StaWifiMac::OnPhyRxSniff, this));
+}
+
+void
+StaWifiMac::OnPhyRxSniff (Ptr<const Packet> packet, uint16_t channelFreqMhz,
+                          uint16_t channelNumber, uint32_t rate, bool isShortPreamble,
+                          WifiTxVector txVector, double signalDbm, double noiseDbm)
+{
+  // Fired right before the frame is handed to the MAC, so inside Receive ()
+  // this holds the power of the frame being processed.
+  m_lastRxSignalDbm = signalDbm;
+}
+
+bool
+StaWifiMac::IsLastBeaconStrongEnough (void) const
+{
+  return m_lastBeaconRssiDbm >= m_minBeaconRssiDbm;
 }
 
 void
@@ -1306,35 +1359,35 @@ StaWifiMac::S1gBeaconReceived (S1gBeaconHeader beacon)
       m_outsideRawEvent = Simulator::Schedule(m_lastRawDurationus, &StaWifiMac::OutsideRawStartBackoff, this);
 
       m_pspollDca->AccessAllowedIfRaw (true);
-      m_dca->AccessAllowedIfRaw (false);
-      m_edca.find (AC_VO)->second->AccessAllowedIfRaw (false);
-      m_edca.find (AC_VI)->second->AccessAllowedIfRaw (false);
-      m_edca.find (AC_BE)->second->AccessAllowedIfRaw (false);
-      m_edca.find (AC_BK)->second->AccessAllowedIfRaw (false);
+      m_dca->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_VO)->second->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_VI)->second->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_BE)->second->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_BK)->second->AccessAllowedIfRaw (m_rawExempt);
       StartRawbackoff();
     }
   else if (m_rawStart && m_inRawGroup && !m_pagedStaRaw  )
     {
       m_outsideRawEvent = Simulator::Schedule(m_lastRawDurationus, &StaWifiMac::OutsideRawStartBackoff, this);
 
-      m_pspollDca->AccessAllowedIfRaw (false);
-      m_dca->AccessAllowedIfRaw (false);
-      m_edca.find (AC_VO)->second->AccessAllowedIfRaw (false);
-      m_edca.find (AC_VI)->second->AccessAllowedIfRaw (false);
-      m_edca.find (AC_BE)->second->AccessAllowedIfRaw (false);
-      m_edca.find (AC_BK)->second->AccessAllowedIfRaw (false);
+      m_pspollDca->AccessAllowedIfRaw (m_rawExempt);
+      m_dca->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_VO)->second->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_VI)->second->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_BE)->second->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_BK)->second->AccessAllowedIfRaw (m_rawExempt);
 	  Simulator::Schedule(m_statSlotStart, &StaWifiMac::RawSlotStartBackoff, this);
     }
  else if (m_rawStart && !m_inRawGroup) //|| (m_rawStart && m_inRawGroup && m_pagedStaRaw && !m_dataBuffered)
     {
       m_outsideRawEvent = Simulator::Schedule(m_lastRawDurationus, &StaWifiMac::OutsideRawStartBackoff, this);
 
-      m_pspollDca->AccessAllowedIfRaw (false);
-      m_dca->AccessAllowedIfRaw (false);
-      m_edca.find (AC_VO)->second->AccessAllowedIfRaw (false);
-      m_edca.find (AC_VI)->second->AccessAllowedIfRaw (false);
-      m_edca.find (AC_BE)->second->AccessAllowedIfRaw (false);
-      m_edca.find (AC_BK)->second->AccessAllowedIfRaw (false);
+      m_pspollDca->AccessAllowedIfRaw (m_rawExempt);
+      m_dca->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_VO)->second->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_VI)->second->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_BE)->second->AccessAllowedIfRaw (m_rawExempt);
+      m_edca.find (AC_BK)->second->AccessAllowedIfRaw (m_rawExempt);
 
       StartRawbackoff();
     }
@@ -1435,8 +1488,9 @@ StaWifiMac::Receive (Ptr<Packet> packet, const WifiMacHeader *hdr)
           Time delay = MicroSeconds (beacon.GetBeaconIntervalUs () * m_maxMissedBeacons);
           RestartBeaconWatchdog (delay);
           SetBssid (hdr->GetAddr3 ());
+          m_lastBeaconRssiDbm = m_lastRxSignalDbm;
         }
-      if (goodBeacon && m_state == BEACON_MISSED)
+      if (goodBeacon && m_state == BEACON_MISSED && IsLastBeaconStrongEnough ())
         {
           SetState (WAIT_ASSOC_RESP);
           SendAssociationRequest ();
@@ -1462,8 +1516,9 @@ StaWifiMac::Receive (Ptr<Packet> packet, const WifiMacHeader *hdr)
        RestartBeaconWatchdog (delay);
        //SetBssid (beacon.GetSA ());
        SetBssid (hdr->GetAddr3 ()); //for debug
+       m_lastBeaconRssiDbm = m_lastRxSignalDbm;
      }
-    if (goodBeacon && m_state == BEACON_MISSED)
+    if (goodBeacon && m_state == BEACON_MISSED && IsLastBeaconStrongEnough ())
      {
        SetState (WAIT_ASSOC_RESP);
        SendAssociationRequest ();

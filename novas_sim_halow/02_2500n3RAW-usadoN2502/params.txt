@@ -1,0 +1,9 @@
+id=2
+batch=20261016-000902
+tag=2500n3RAW-usadoN2502
+nsta_requested=2500
+nsta_used=2502
+ngroup=3
+numslot=1
+comando=./waf --run "halow-ofc --Nsta=2502 --NGroup=3 --NRawSlotNum=1 --RAWConfigFile=results/rawconfigs/RawConfig-N2502-G3-S1.txt --BeaconInterval=102400 --pageSliceCount=0 --pageSliceLength=1 --simulationTime=60 --TrafficInterval=1000"
+avisos=Nsta solicitado=2500; ajustado para 2502 para ser divisível por NGroup=3.AIDs distribuídos por múltiplas páginas (0..3); exige gerador e AP com suporte multi-página. 

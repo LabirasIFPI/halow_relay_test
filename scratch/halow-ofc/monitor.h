@@ -35,6 +35,7 @@
 #include <map>
 #include <tuple>
 #include <limits>
+#include <cmath>
 
 using namespace ns3;
 
@@ -150,6 +151,41 @@ std::map<uint32_t, double> g_rssiMinNodeAp;
 std::map<uint32_t, double> g_rssiMaxNodeAp;
 std::map<uint32_t, RadioDirectionStats> g_apRxFromNode; // uplink: AP recebe do nó
 std::map<uint32_t, RadioDirectionStats> g_nodeRxFromAp; // downlink: nó recebe do AP
+// PDR por enlace filho -> pai (um salto: STA -> gateway, STA -> relay ou
+// relay -> gateway), contado em quadros MAC unicast, incluindo retransmissões
+// e pedidos de associação. ACK/CTS ficam de fora porque não têm Addr2 (não dá
+// para atribuir o transmissor na recepção).
+struct LinkFrameStats {
+    uint64_t ulTx = 0, ulRx = 0; // filho -> pai: enviados / decodificados no pai
+    uint64_t dlTx = 0, dlRx = 0; // pai -> filho: enviados / decodificados no filho
+    RadioDirectionStats ul;      // sinal no pai, de quadros do filho
+    RadioDirectionStats dl;      // sinal no filho, de quadros do pai (inclui beacons)
+    // Falhas: quadros de dados que o MAC abandonou após esgotar as retransmissões,
+    // e quadros endereçados ao receptor que o PHY dele descartou (por motivo).
+    uint64_t ulMacDesistiu = 0, dlMacDesistiu = 0;
+    std::map<int, uint64_t> ulPhyDescarte, dlPhyDescarte; // DropReason -> quantidade
+};
+typedef std::pair<uint32_t, uint32_t> LinkKey; // (nó filho, nó pai)
+std::map<LinkKey, LinkFrameStats> g_linkFrames;
+std::map<uint32_t, uint32_t> g_paiNo;          // filho -> pai; ausente = AP central
+std::map<Mac48Address, bool> g_macIsAp;        // MAC -> é a interface AP de um nó?
+std::map<uint32_t, Ptr<YansWifiPhy> > g_staPhyDoNo; // PHY da interface STA de cada nó
+std::map<uint32_t, Ptr<YansWifiPhy> > g_apPhyDoNo;  // PHY da interface AP de cada nó
+
+inline uint32_t PaiDe(uint32_t no)
+{
+    auto it = g_paiNo.find(no);
+    return it == g_paiNo.end() ? g_centralApId : it->second;
+}
+
+// Define o pai de um nó (ex.: STA atrás de um relay). Padrão: AP central.
+inline void DefinirPai(uint32_t filho, uint32_t pai) { g_paiNo[filho] = pai; }
+
+inline bool MacEhAp(const Mac48Address& mac)
+{
+    auto it = g_macIsAp.find(mac);
+    return it != g_macIsAp.end() && it->second;
+}
 std::map<uint32_t, double> g_energyTxJ; // energia TX estimada por nó
 std::map<uint32_t, double> g_energyRxJ; // energia RX estimada por nó
 
@@ -213,6 +249,7 @@ std::map<uint32_t, NodeStats>              g_nodeStats;
 std::map<PktKey, PendingTx>                g_pending;
 
 bool     g_logPacketRecords = true;   // false = só estatísticas agregadas (usa menos memória)
+bool     g_logRadioSamples  = true;   // false = não guarda cada quadro recebido (radio_rx_samples.csv)
 bool     g_verbose          = false;
 
 // ------------------------------------------------------------
@@ -235,14 +272,20 @@ public:
     {
         // Identifica o transmissor pelo Addr2 do cabeçalho MAC
         uint32_t sender = 0xFFFFFFFF;
+        uint32_t receiver = 0xFFFFFFFF; // destino MAC (Addr1) do quadro
+        Mac48Address addr1, addr2;
         if (packet) {
             Ptr<Packet> copy = packet->Copy();
             WifiMacHeader hdr;
             if (copy->GetSize() >= 10) {
                 copy->PeekHeader(hdr);
                 if (!(hdr.IsAck() || hdr.IsCts())) {
-                    auto it = g_macToNode.find(hdr.GetAddr2());
+                    addr1 = hdr.GetAddr1();
+                    addr2 = hdr.GetAddr2();
+                    auto it = g_macToNode.find(addr2);
                     if (it != g_macToNode.end()) sender = it->second;
+                    auto rt = g_macToNode.find(addr1);
+                    if (rt != g_macToNode.end()) receiver = rt->second;
                 }
             }
         }
@@ -262,7 +305,29 @@ public:
         rec.rssiQuality   = RSSIparaQualidade(signalDbm);
         rec.snrQuality    = SNRparaQualidade(rec.snr);
         rec.linkQuality   = CalcularQualidadeEnlace(signalDbm, rec.snr);
-        g_rssiHistory.push_back(rec);
+        if (g_logRadioSamples) g_rssiHistory.push_back(rec);
+
+        // Enlaces filho -> pai. Unicast decodificado conta para o PDR; beacons
+        // (broadcast) do pai só entram como amostra de sinal de downlink, usada
+        // para estimar o uplink por reciprocidade quando o pai nunca ouve o filho.
+        if (sender != 0xFFFFFFFFu) {
+            const bool txIsAp = MacEhAp(addr2);
+            if (receiver == m_nodeId) {
+                const bool rxIsAp = MacEhAp(addr1);
+                if (rxIsAp && !txIsAp) {
+                    LinkFrameStats& l = g_linkFrames[LinkKey(sender, m_nodeId)];
+                    l.ulRx++;
+                    AddRadioDirectionSample(l.ul, signalDbm, noiseDbm, rec.snr, rec.rssiQuality, rec.snrQuality, rec.linkQuality);
+                } else if (!rxIsAp && txIsAp) {
+                    LinkFrameStats& l = g_linkFrames[LinkKey(m_nodeId, sender)];
+                    l.dlRx++;
+                    AddRadioDirectionSample(l.dl, signalDbm, noiseDbm, rec.snr, rec.rssiQuality, rec.snrQuality, rec.linkQuality);
+                }
+            } else if (addr1.IsGroup() && txIsAp && sender == PaiDe(m_nodeId)) {
+                LinkFrameStats& l = g_linkFrames[LinkKey(m_nodeId, sender)];
+                AddRadioDirectionSample(l.dl, signalDbm, noiseDbm, rec.snr, rec.rssiQuality, rec.snrQuality, rec.linkQuality);
+            }
+        }
 
         // Mantém uplink e downlink separados: o RSSI é sempre medido no receptor.
         if (m_nodeId == g_centralApId && sender != 0xFFFFFFFFu && sender != g_centralApId) {
@@ -300,6 +365,95 @@ public:
 private:
     uint32_t    m_nodeId;
     uint32_t    m_devIdx;
+    std::string m_iface;
+};
+
+// Conta quadros unicast transmitidos nos enlaces filho <-> pai (PhyTxBegin).
+class FrameTxSniffer
+{
+public:
+    FrameTxSniffer(uint32_t nodeId, Mac48Address mac) : m_nodeId(nodeId), m_mac(mac) {}
+
+    void operator()(Ptr<const Packet> packet) const
+    {
+        if (!packet || packet->GetSize() < 10) return;
+        Ptr<Packet> copy = packet->Copy();
+        WifiMacHeader hdr;
+        copy->PeekHeader(hdr);
+        if (hdr.IsAck() || hdr.IsCts()) return;
+        auto rt = g_macToNode.find(hdr.GetAddr1());
+        if (rt == g_macToNode.end()) return; // broadcast (beacons) e destinos desconhecidos
+
+        const bool txIsAp = MacEhAp(m_mac), rxIsAp = MacEhAp(hdr.GetAddr1());
+        if (!txIsAp && rxIsAp)      g_linkFrames[LinkKey(m_nodeId, rt->second)].ulTx++;
+        else if (txIsAp && !rxIsAp) g_linkFrames[LinkKey(rt->second, m_nodeId)].dlTx++;
+    }
+
+private:
+    uint32_t m_nodeId;
+    Mac48Address m_mac;
+};
+
+// Descartes nas filas MAC de cada rádio (RegularWifiMac::PacketDropped),
+// separados por motivo: fila cheia ou tempo máximo na fila excedido.
+struct QueueDropStats { uint64_t cheia = 0, tempo = 0, outros = 0; };
+std::map<std::pair<uint32_t, std::string>, QueueDropStats> g_queueDrops; // (nó, "AP"/"STA")
+
+// Quadros endereçados a este rádio que o PHY descartou (dormindo, ocupado, erro...),
+// atribuídos ao enlace filho <-> pai pelo Addr2 do quadro.
+class PhyDropSniffer
+{
+public:
+    PhyDropSniffer(uint32_t nodeId, Mac48Address mac) : m_nodeId(nodeId), m_mac(mac) {}
+    void operator()(Ptr<const Packet> packet, DropReason reason) const
+    {
+        if (!packet || packet->GetSize() < 10) return;
+        Ptr<Packet> copy = packet->Copy();
+        WifiMacHeader hdr;
+        copy->PeekHeader(hdr);
+        if (hdr.IsAck() || hdr.IsCts() || hdr.GetAddr1() != m_mac) return;
+        auto it = g_macToNode.find(hdr.GetAddr2());
+        if (it == g_macToNode.end()) return;
+        const bool rxIsAp = MacEhAp(m_mac), txIsAp = MacEhAp(hdr.GetAddr2());
+        if (rxIsAp && !txIsAp)      g_linkFrames[LinkKey(it->second, m_nodeId)].ulPhyDescarte[reason]++;
+        else if (!rxIsAp && txIsAp) g_linkFrames[LinkKey(m_nodeId, it->second)].dlPhyDescarte[reason]++;
+    }
+private:
+    uint32_t m_nodeId;
+    Mac48Address m_mac;
+};
+
+// Quadros de dados que o MAC deste rádio abandonou após o limite de retransmissões.
+class MacDesistenciaSniffer
+{
+public:
+    MacDesistenciaSniffer(uint32_t nodeId, Mac48Address mac) : m_nodeId(nodeId), m_mac(mac) {}
+    void operator()(Mac48Address destino) const
+    {
+        auto it = g_macToNode.find(destino);
+        if (it == g_macToNode.end()) return;
+        const bool txIsAp = MacEhAp(m_mac), rxIsAp = MacEhAp(destino);
+        if (!txIsAp && rxIsAp)      g_linkFrames[LinkKey(m_nodeId, it->second)].ulMacDesistiu++;
+        else if (txIsAp && !rxIsAp) g_linkFrames[LinkKey(it->second, m_nodeId)].dlMacDesistiu++;
+    }
+private:
+    uint32_t m_nodeId;
+    Mac48Address m_mac;
+};
+
+class QueueDropSniffer
+{
+public:
+    QueueDropSniffer(uint32_t nodeId, std::string iface) : m_nodeId(nodeId), m_iface(iface) {}
+    void operator()(Ptr<const Packet> packet, DropReason reason) const
+    {
+        QueueDropStats& s = g_queueDrops[std::make_pair(m_nodeId, m_iface)];
+        if (reason == MacQueueSizeExceeded) s.cheia++;
+        else if (reason == MacQueueDelayExceeded) s.tempo++;
+        else s.outros++;
+    }
+private:
+    uint32_t m_nodeId;
     std::string m_iface;
 };
 
@@ -453,6 +607,10 @@ private:
 // ------------------------------------------------------------
 std::vector<RssiSniffer*>   g_rssiSniffers;
 std::vector<PacketSniffer*> g_pktSniffers;
+std::vector<FrameTxSniffer*> g_txSniffers;
+std::vector<QueueDropSniffer*> g_queueSniffers;
+std::vector<PhyDropSniffer*> g_phyDropSniffers;
+std::vector<MacDesistenciaSniffer*> g_desistenciaSniffers;
 
 // ------------------------------------------------------------
 // 6. Detecta papéis (STA / AP / RELAY) e monta tabelas MAC/IP
@@ -469,10 +627,12 @@ void DetectarPapeis(NodeContainer nodes)
             if (!w) continue;
             Ptr<WifiMac> mac = w->GetMac();
             std::string t = "UNKNOWN";
-            if (DynamicCast<StaWifiMac>(mac))     { hasSta = true; t = "STA"; }
-            else if (DynamicCast<ApWifiMac>(mac)) { hasAp  = true; t = "AP";  }
+            Ptr<YansWifiPhy> phy = DynamicCast<YansWifiPhy>(w->GetPhy());
+            if (DynamicCast<StaWifiMac>(mac))     { hasSta = true; t = "STA"; g_staPhyDoNo[id] = phy; }
+            else if (DynamicCast<ApWifiMac>(mac)) { hasAp  = true; t = "AP";  g_apPhyDoNo[id] = phy; }
             g_devIface[{id, w->GetIfIndex()}] = t;
             g_macToNode[Mac48Address::ConvertFrom(w->GetAddress())] = id;
+            g_macIsAp[Mac48Address::ConvertFrom(w->GetAddress())] = (t == "AP");
         }
 
         if (hasAp && hasSta) g_nodeRole[id] = NodeRole::RELAY;
@@ -513,6 +673,26 @@ void InstalarSniffers(NodeContainer nodes, uint32_t centralApId = 0)
             g_rssiSniffers.push_back(s);
             w->GetPhy()->TraceConnectWithoutContext(
                 "MonitorSnifferRx", MakeCallback(&RssiSniffer::operator(), s));
+
+            FrameTxSniffer* tx = new FrameTxSniffer(nodeId, Mac48Address::ConvertFrom(w->GetAddress()));
+            g_txSniffers.push_back(tx);
+            w->GetPhy()->TraceConnectWithoutContext(
+                "PhyTxBegin", MakeCallback(&FrameTxSniffer::operator(), tx));
+
+            QueueDropSniffer* qd = new QueueDropSniffer(nodeId, t);
+            g_queueSniffers.push_back(qd);
+            w->GetMac()->TraceConnectWithoutContext(
+                "PacketDropped", MakeCallback(&QueueDropSniffer::operator(), qd));
+
+            const Mac48Address mac = Mac48Address::ConvertFrom(w->GetAddress());
+            PhyDropSniffer* pd = new PhyDropSniffer(nodeId, mac);
+            g_phyDropSniffers.push_back(pd);
+            w->GetPhy()->TraceConnectWithoutContext(
+                "PhyRxDropWithReason", MakeCallback(&PhyDropSniffer::operator(), pd));
+            MacDesistenciaSniffer* md = new MacDesistenciaSniffer(nodeId, mac);
+            g_desistenciaSniffers.push_back(md);
+            w->GetRemoteStationManager()->TraceConnectWithoutContext(
+                "MacTxFinalDataFailed", MakeCallback(&MacDesistenciaSniffer::operator(), md));
         }
 
         // --- Pacotes IP: um sniffer por nó ---
@@ -578,6 +758,124 @@ void ExportarResumoEnlaceApCsv(const std::string& filename)
         } else out << ",,,,,,,,,";
         out << "\n";
     }
+}
+
+inline double DistanciaEntreNos(uint32_t a, uint32_t b)
+{
+    Ptr<MobilityModel> ma = NodeList::GetNode(a)->GetObject<MobilityModel>();
+    Ptr<MobilityModel> mb = NodeList::GetNode(b)->GetObject<MobilityModel>();
+    return (ma && mb) ? ma->GetDistanceFrom(mb) : -1.0;
+}
+
+// Uma linha por enlace filho -> pai (STA -> gateway, STA -> relay, relay -> gateway):
+// PDR em quadros MAC + SNR de uplink na mesma escala que o PHY usa.
+// O noise do MonitorSnifferRx vem SEM a figura de ruído (yans-wifi-phy.cc),
+// então o SNR "real" = RSSI - piso de ruído com NF. Quando o pai não decodificou
+// nada do filho, o RSSI de uplink é estimado por reciprocidade a partir do downlink:
+// perda de percurso = (Ptx_pai + Gtx_pai + Grx_filho) - RSSI_dl.
+// (Colunas "_at_ap" mantidas por compatibilidade: significam "no pai".)
+void ExportarResumoEnlaceQuadrosCsv(const std::string& filename)
+{
+    std::ofstream out(filename.c_str());
+    out << "node_id,parent_node_id,parent_role,distance_to_parent_m,distance_to_central_ap_m,"
+           "ul_frames_tx,ul_frames_rx_at_ap,ul_frame_pdr,"
+           "dl_frames_tx,dl_frames_rx_at_node,dl_frame_pdr,"
+           "ul_rssi_measured_dbm,ul_rssi_reciprocity_dbm,ul_snr_phy_db,ul_snr_source,"
+           "ul_link_quality_proxy_old_0_100\n";
+
+    for (const auto& role : g_nodeRole) {
+        const uint32_t id = role.first;
+        if (role.second != NodeRole::STA && role.second != NodeRole::RELAY) continue;
+        const uint32_t pai = PaiDe(id);
+        Ptr<YansWifiPhy> apPhy = g_apPhyDoNo[pai];
+        Ptr<YansWifiPhy> staPhy = g_staPhyDoNo[id];
+        if (!apPhy || !staPhy) continue;
+        const double paiNoiseFloorDbm = -174.0 + 10.0 * std::log10(apPhy->GetChannelWidth() * 1e6)
+                                        + apPhy->GetRxNoiseFigure();
+        const LinkFrameStats& f = g_linkFrames[LinkKey(id, pai)];
+
+        out << id << "," << pai << "," << RoleToString(g_nodeRole[pai]) << ","
+            << DistanciaEntreNos(id, pai) << "," << DistanciaAteAp(id) << ","
+            << f.ulTx << "," << f.ulRx << ",";
+        if (f.ulTx) out << static_cast<double>(f.ulRx) / f.ulTx;
+        out << "," << f.dlTx << "," << f.dlRx << ",";
+        if (f.dlTx) out << static_cast<double>(f.dlRx) / f.dlTx;
+        out << ",";
+
+        const bool hasMeasured = f.ul.n > 0;
+        const bool hasRecip = f.dl.n > 0;
+        const double ulRssiMeasured = hasMeasured ? f.ul.rssiSum / f.ul.n : 0.0;
+        double ulRssiRecip = 0.0;
+        if (hasRecip) {
+            const double pathLossDb = apPhy->GetTxPowerStart() + apPhy->GetTxGain() + staPhy->GetRxGain()
+                                      - f.dl.rssiSum / f.dl.n;
+            ulRssiRecip = staPhy->GetTxPowerStart() + staPhy->GetTxGain() + apPhy->GetRxGain() - pathLossDb;
+        }
+
+        if (hasMeasured) out << ulRssiMeasured;
+        out << ",";
+        if (hasRecip) out << ulRssiRecip;
+        out << ",";
+        if (hasMeasured)   out << ulRssiMeasured - paiNoiseFloorDbm << ",measured";
+        else if (hasRecip) out << ulRssiRecip - paiNoiseFloorDbm << ",reciprocity";
+        else               out << ",";
+        out << ",";
+        if (hasMeasured) out << (f.ul.linkQualitySum / f.ul.n) * 100.0 / 255.0;
+        out << "\n";
+    }
+}
+
+// Uma linha por enlace filho -> pai: por que quadros de dados não foram entregues.
+// phy_*: quadros endereçados ao receptor que o PHY dele descartou;
+// mac_gave_up: quadros que o transmissor abandonou após esgotar as retransmissões.
+void ExportarFalhasEnlaceCsv(const std::string& filename)
+{
+    auto soma = [](const std::map<int, uint64_t>& m, std::initializer_list<int> motivos) {
+        uint64_t s = 0;
+        for (int r : motivos) { auto it = m.find(r); if (it != m.end()) s += it->second; }
+        return s;
+    };
+    auto outros = [](const std::map<int, uint64_t>& m) {
+        uint64_t s = 0;
+        for (const auto& kv : m)
+            if (kv.first != PhyInSleepMode && kv.first != PhyAlreadyReceiving &&
+                kv.first != PhyAlreadyTransmitting && kv.first != PhyPlcpReceptionFailed &&
+                kv.first != PhyPreampleHeaderReceptionFailed && kv.first != PhyNotEnoughSignalPower)
+                s += kv.second;
+        return s;
+    };
+    std::ofstream out(filename.c_str());
+    out << "node_id,parent_node_id,direction,frames_tx,frames_rx,mac_gave_up,"
+           "phy_drop_sleeping,phy_drop_busy_receiving,phy_drop_busy_transmitting,"
+           "phy_drop_decode_error,phy_drop_weak_signal,phy_drop_other\n";
+    for (const auto& role : g_nodeRole) {
+        const uint32_t id = role.first;
+        if (role.second != NodeRole::STA && role.second != NodeRole::RELAY) continue;
+        const uint32_t pai = PaiDe(id);
+        const LinkFrameStats& f = g_linkFrames[LinkKey(id, pai)];
+        const std::map<int, uint64_t>* drops[2] = { &f.ulPhyDescarte, &f.dlPhyDescarte };
+        const char* dir[2] = { "uplink", "downlink" };
+        const uint64_t tx[2] = { f.ulTx, f.dlTx }, rx[2] = { f.ulRx, f.dlRx };
+        const uint64_t desist[2] = { f.ulMacDesistiu, f.dlMacDesistiu };
+        for (int k = 0; k < 2; k++) {
+            const std::map<int, uint64_t>& m = *drops[k];
+            out << id << "," << pai << "," << dir[k] << "," << tx[k] << "," << rx[k] << "," << desist[k] << ","
+                << soma(m, {PhyInSleepMode}) << "," << soma(m, {PhyAlreadyReceiving}) << ","
+                << soma(m, {PhyAlreadyTransmitting}) << ","
+                << soma(m, {PhyPlcpReceptionFailed, PhyPreampleHeaderReceptionFailed}) << ","
+                << soma(m, {PhyNotEnoughSignalPower}) << "," << outros(m) << "\n";
+        }
+    }
+}
+
+void ExportarDescartesFilaCsv(const std::string& filename)
+{
+    std::ofstream out(filename.c_str());
+    out << "node_id,node_role,interface,drops_queue_full,drops_queue_delay_exceeded,drops_other\n";
+    for (const auto& kv : g_queueDrops)
+        out << kv.first.first << "," << RoleToString(g_nodeRole[kv.first.first]) << ","
+            << kv.first.second << "," << kv.second.cheia << "," << kv.second.tempo << ","
+            << kv.second.outros << "\n";
 }
 
 void ExportarEventosIpCsv(const std::string& filename)
@@ -736,9 +1034,12 @@ void ExportarTudo(const std::string& prefixo, double simTime)
     // as aplicações/eventos continuam além desse valor. Requer chamar antes de Destroy().
     const double observedSimTime = Simulator::Now().GetSeconds();
     const double durationForRates = observedSimTime > 0.0 ? observedSimTime : simTime;
-    ExportarAmostrasRadioCsv(prefixo + "_radio_rx_samples.csv");
+    if (g_logRadioSamples) ExportarAmostrasRadioCsv(prefixo + "_radio_rx_samples.csv");
     ExportarResumoEnlaceApCsv(prefixo + "_link_ap_summary.csv");
-    ExportarEventosIpCsv(prefixo + "_ip_packet_events.csv");
+    ExportarResumoEnlaceQuadrosCsv(prefixo + "_link_frame_summary.csv");
+    ExportarDescartesFilaCsv(prefixo + "_queue_drops.csv");
+    ExportarFalhasEnlaceCsv(prefixo + "_link_failures.csv");
+    if (g_logPacketRecords) ExportarEventosIpCsv(prefixo + "_ip_packet_events.csv");
     ExportarResumoFluxosCsv(prefixo + "_flow_summary.csv");
     ExportarResumoNosCsv(prefixo + "_node_summary.csv", durationForRates);
     ExportarResumoSimulacaoCsv(prefixo + "_simulation_summary.csv", durationForRates);
@@ -754,8 +1055,16 @@ void LimparSniffers()
 {
     for (auto* s : g_rssiSniffers) delete s;
     for (auto* s : g_pktSniffers)  delete s;
+    for (auto* s : g_txSniffers)   delete s;
+    for (auto* s : g_queueSniffers) delete s;
+    for (auto* s : g_phyDropSniffers) delete s;
+    for (auto* s : g_desistenciaSniffers) delete s;
+    g_phyDropSniffers.clear();
+    g_desistenciaSniffers.clear();
+    g_queueSniffers.clear();
     g_rssiSniffers.clear();
     g_pktSniffers.clear();
+    g_txSniffers.clear();
 }
 
 #endif // MONITOR_H

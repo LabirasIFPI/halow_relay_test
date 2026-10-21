@@ -31,9 +31,15 @@ CSV_DIRS=". scratch"            # onde o simulador pode deixar os CSVs (cwd do w
 
 BEACON="102400"
 PAGESLICE_COUNT="0"
-PAGESLICE_LEN="1"
+# 31 = o TIM do beacon cobre os blocos 0..30 (AIDs 1..~1983). Com 1, só o bloco 0
+# (AIDs 1..63) é anunciado e as STAs com AID >= 64 dormem e perdem o downlink.
+PAGESLICE_LEN="31"
 NUMSLOT="2"
 SIM_TIME="${SIM_TIME:-}"      # vazio = usa o default do simulador (ex.: SIM_TIME=30 ./run_halow.sh groups)
+SPACING="${SPACING:-}"        # vazio = 100 m (default do halow-ofc); ex.: SPACING=200 ./run_halow.sh 2500
+# MONITOR_LEVE=1 desliga os CSVs por quadro/evento (radio_rx_samples, ip_packet_events),
+# que crescem muito com milhares de nós; os resumos por enlace/nó continuam.
+MONITOR_LEVE="${MONITOR_LEVE:-0}"
 
 # --- Bateria principal: Nsta x numero de grupos RAW ---
 NSTA_LIST="625 1250 2500"
@@ -186,6 +192,7 @@ run_test() {
     if [ "$nsta" != "$requested_nsta" ]; then
         tag="${tag}-usadoN${nsta}"
     fi
+    [ -n "$SPACING" ] && tag="${tag}-esp${SPACING}m"
     safe_tag=$(printf '%s' "$tag" | sed 's/[^A-Za-z0-9_.-]/_/g')
     folder="${RESULTS_DIR}/$(printf '%02d' "$id")_${safe_tag}"
     if [ -e "$folder" ]; then
@@ -220,6 +227,8 @@ run_test() {
     sim_args="${sim_args} --RAWConfigFile=${RAWPATH} --BeaconInterval=${BEACON}"
     sim_args="${sim_args} --pageSliceCount=${PAGESLICE_COUNT} --pageSliceLength=${PAGESLICE_LEN}"
     [ -n "$SIM_TIME" ]    && sim_args="${sim_args} --simulationTime=${SIM_TIME}"
+    [ -n "$SPACING" ]     && sim_args="${sim_args} --Spacing=${SPACING}"
+    [ "$MONITOR_LEVE" = "1" ] && sim_args="${sim_args} --MonitorRadioSamples=false --MonitorPacketRecords=false"
     [ -n "$extra_args" ]  && sim_args="${sim_args} ${extra_args}"
 
     {

@@ -49,7 +49,7 @@ struct Configuration {
 
 	uint32_t pagePeriod=2;  	//  Number of Beacon Intervals between DTIM beacons that carry Page Slice element for the associated page
 	uint8_t pageIndex = 0;
-	uint32_t pageSliceLength=1; //  Number of blocks in each TIM for the associated page except for the last TIM (1-31) (value 0 is reserved);
+	uint32_t pageSliceLength=31; // 31 cobre AIDs 1..~1983 no TIM; 1 cobria só AIDs 1..63 (STAs com AID >= 64 perdiam o downlink).   Number of blocks in each TIM for the associated page except for the last TIM (1-31) (value 0 is reserved);
 	uint32_t pageSliceCount=0;  //  Number of TIMs in a single page period (1-31)
 	uint8_t blockOffset = 0;  	//  The 1st page slice starts with the block with blockOffset number
 	uint8_t timOffset = 0;    	//  Offset in number of Beacon Intervals from the DTIM that carries the first page slice of the page
@@ -139,6 +139,58 @@ struct Configuration {
 	uint32_t Nrelays;
 
 	uint32_t NleafsPerRelay;
+
+	double gridSpacing = 100.0; // distância entre células da matriz (m)
+
+	// Topologia:
+	//  "grid" (padrão): matriz a partir do gateway, Nsta definido por --Nsta (comportamento original).
+	//  "area": matriz que preenche uma área AreaSize x AreaSize com espaçamento gridSpacing;
+	//          gateway no canto inferior direito (AreaSize, 0); Nsta = pontos da matriz - 1.
+	string topology = "grid";
+	double areaSize = 200.0;
+	// Relays (só na topologia "area"), em posições fixas "x1,y1;x2,y2;..." (m); cada
+	// posição vira o nó da matriz mais próximo. Sem posições: numRelays=1 põe um
+	// relay no centro da área (teste da Krisna); numRelays=0 = só o gateway.
+	string relayPositions = "";
+	uint32_t numRelays = 0;
+	// Escolha do pai de cada nó (topologia "area"): enlace válido se LQI previsto
+	// >= minLqiParent (com curva) ou SNR previsto >= minSnrParent (sem curva);
+	// entre os válidos, menos saltos até o gateway, depois maior LQI, depois maior SNR.
+	string lqiCurveFile = "";      // curva_lqi.csv do calibrar_lqi.py
+	double minLqiParent = 80.0;
+	double minSnrParent = 1.0;
+	uint32_t maxChildren = 0;      // máximo de filhos por AP (0 = sem limite)
+	// Fila de dados (BE) do lado AP dos relays. O cenário ajusta só DeviceList/0
+	// (STAs, lado STA dos relays e o gateway); o AP do relay é DeviceList/1 e fica
+	// com o padrão do ns-3: 400 pacotes e descarte após 500 ms na fila.
+	// false = o lado STA dos relays nunca dorme (o padrão do módulo é dormir como
+	// qualquer STA, o que faz a descida encontrar o relay dormindo)
+	bool relayStaPowerSave = true;
+	// true = o RAW não restringe o lado STA dos relays (eles disputam o canal a
+	// qualquer momento; por padrão recebem o mesmo slot RAW de um sensor)
+	bool relayStaRawExempt = false;
+	// Diagnóstico: índice da STA cujo acesso ao canal (lado STA) é registrado
+	// em resultado_access_trace.csv (-1 = desligado)
+	int traceAccessNode = -1;
+	// Fila de dados do lado STA dos relays (subida de todos os nós abaixo dele).
+	// Por padrão herda os 10 pacotes de todo DeviceList/0, igual a um sensor.
+	uint32_t relayStaQueueMaxPackets = 10;
+	double relayApQueueMaxDelayMs = 500.0;
+	// Fila de dados do gateway (AP central). O cenário original aplica 10 pacotes
+	// a todo DeviceList/0, o que inclui o gateway; com relays, ele concentra a descida.
+	uint32_t gatewayApQueueMaxPackets = 10;
+	uint32_t relayApQueueMaxPackets = 400;
+	string parentPreference = "saltos"; // "saltos" (menos saltos primeiro) ou "sinal" (maior LQI/SNR)
+
+	// Potência do AP. 30 dBm = original; 0 dBm = enlace simétrico com as STAs
+	// (0 dBm + 3 dB de ganho TX do AP = 0 dBm da STA + 3 dB de ganho RX do AP).
+	double apTxPowerDbm = 30.0;
+	// STA só tenta associar se o beacon chegar com pelo menos esta potência (dBm).
+	// -1000 = desligado (comportamento original).
+	double minBeaconRssiForAssoc = -1000.0;
+
+	bool monitorRadioSamples = true;  // false: não exporta resultado_radio_rx_samples.csv
+	bool monitorPacketRecords = true; // false: não exporta resultado_ip_packet_events.csv
 
 	Configuration();
 	Configuration(int argc, char *argv[]);

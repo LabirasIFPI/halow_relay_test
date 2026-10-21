@@ -18,6 +18,30 @@
 
 #include "s1g-test-tim-raw.h"
 #include "monitor.h"
+#include "topologia.h"
+
+// Árvore (Topology=area): pai de cada STA (PAI_GATEWAY ou índice do relay pai)
+// e quais STAs são relays.
+std::vector<int> g_paiDe;
+std::vector<bool> g_ehRelay;
+std::vector<bool> g_clienteIniciado;    // cliente UDP echo já instalado?
+
+// Diagnóstico de acesso ao canal de uma STA (--TraceAccessNode).
+// Códigos: 0/1 = acesso bloqueado/liberado pelo RAW; 10/20/40 = pedido de acesso;
+// 41 = há pacote e acesso liberado, mas já existe pedido pendente; 30/66 = início de RAW;
+// 98 = acesso concedido enquanto bloqueado (desperdiçado); 99 = acesso concedido;
+// 77 = ACK recebido; 50 = início de transmissão de dados; 51 = outra transmissão;
+// 60+estado = mudança de estado do rádio (60 IDLE, 61 CCA_BUSY, 62 TX, 63 RX, 64 SWITCHING, 65 SLEEP).
+std::ofstream g_traceAcesso;
+void TraceAcessoEdca(double t, double codigo) { g_traceAcesso << t << "," << codigo << std::endl; }
+void TraceAcessoTx(Ptr<const Packet> p) {
+	WifiMacHeader h;
+	bool dados = p->GetSize() >= 10 && p->Copy()->PeekHeader(h) && h.IsData();
+	g_traceAcesso << Simulator::Now().GetMicroSeconds() << "," << (dados ? 50 : 51) << std::endl;
+}
+void TraceAcessoEstado(Time inicio, Time duracao, WifiPhy::State estado) {
+	g_traceAcesso << inicio.GetMicroSeconds() << "," << 60 + (int) estado << std::endl;
+}
 
 NS_LOG_COMPONENT_DEFINE("s1g-wifi-network-tim-raw");
 
@@ -331,6 +355,26 @@ void onSTAAssociated(int i) {
 	}
 
 	eventManager.onNodeAssociated(*nodes[i]);
+
+	// UDP echo: cada STA começa a transmitir quando ELA associa e todos os relays
+	// do caminho até o gateway também estão associados.
+	// Assim um nó que nunca associa não trava os outros, e pacotes enviados
+	// antes da associação não entram como perda.
+	if (config.trafficType == "udpecho") {
+		static bool serverConfigured = false;
+		if (!serverConfigured) {
+			configureUDPEchoServer();
+			stats.TimeWhenEverySTAIsAssociated = Simulator::Now();
+			updateNodesQueueLength();
+			serverConfigured = true;
+		}
+		startUDPEchoClientIfReady(i);
+		// um relay que associa pode completar o caminho de nós abaixo dele
+		if (i < (int) g_ehRelay.size() && g_ehRelay[i])
+			for (uint32_t j = 0; j < g_paiDe.size(); j++)
+				startUDPEchoClientIfReady(j);
+		return;
+	}
 
 	// RPS, Raw group and RAW slot assignment
 	static bool trafficConfigured = false;
@@ -1068,6 +1112,33 @@ void configureUDPClients() {
 	//Simulator::Stop (Seconds (config.simulationTime+1));
 }
 
+void startUDPEchoClientIfReady(int i) {
+	if (g_clienteIniciado.size() < config.Nsta) g_clienteIniciado.resize(config.Nsta, false);
+	if (g_clienteIniciado[i] || !nodes[i]->isAssociated) return;
+	// todos os relays do caminho até o gateway precisam estar associados
+	int pai = (i < (int) g_paiDe.size()) ? g_paiDe[i] : PAI_GATEWAY;
+	for (uint32_t guarda = 0; pai >= 0 && guarda < g_paiDe.size(); guarda++) {
+		if (!nodes[pai]->isAssociated) return;
+		pai = g_paiDe[pai];
+	}
+	g_clienteIniciado[i] = true;
+
+	UdpEchoClientHelper clientHelper(apNodeInterface.GetAddress(0), 9);
+	clientHelper.SetAttribute("MaxPackets", UintegerValue(4294967295u));
+	clientHelper.SetAttribute("Interval", TimeValue(MilliSeconds(config.trafficInterval)));
+	clientHelper.SetAttribute("PacketSize", UintegerValue(config.payloadSize));
+
+	ApplicationContainer clientApp = clientHelper.Install(wifiStaNode.Get(i));
+	clientApp.Get(0)->TraceConnectWithoutContext("Tx",
+			MakeCallback(&NodeEntry::OnUdpPacketSent, nodes[i]));
+	clientApp.Get(0)->TraceConnectWithoutContext("Rx",
+			MakeCallback(&NodeEntry::OnUdpEchoPacketReceived, nodes[i]));
+
+	Ptr<UniformRandomVariable> m_rv = CreateObject<UniformRandomVariable>();
+	double random = m_rv->GetValue(0, config.trafficInterval);
+	clientApp.Start(MilliSeconds(random));
+}
+
 void configureUDPEchoClients() {
 	UdpEchoClientHelper clientHelper(apNodeInterface.GetAddress(0), 9); //address of remote node
 	clientHelper.SetAttribute("MaxPackets", UintegerValue(4294967295u));
@@ -1182,6 +1253,35 @@ int main(int argc, char *argv[]) {
 
 	bool OutputPosition = true;
 	config = Configuration(argc, argv);
+	Config::SetDefault("ns3::StaWifiMac::MinBeaconRssiForAssoc", DoubleValue(config.minBeaconRssiForAssoc));
+
+	// Topologia: posições e pai de cada STA (definidos antes da simulação)
+	Topologia topo;
+	if (config.topology == "area") {
+		topo = MontarTopologiaArea(config.areaSize, config.gridSpacing, config.numRelays, config.relayPositions);
+		cout << "Topology=area: " << config.areaSize << " x " << config.areaSize << " m, espaçamento "
+				<< config.gridSpacing << " m -> Nsta=" << topo.sta.size() << " (inclui os relays)" << endl;
+		config.Nsta = topo.sta.size();
+	} else {
+		double xpos0 = std::stoi(config.rho, nullptr, 0);
+		topo = MontarTopologiaGrid(config.Nsta, xpos0, xpos0, config.gridSpacing);
+	}
+	// Árvore: a qual AP (gateway ou relay) cada nó se liga
+	CriterioEnlace criterio;
+	criterio.curva = LerCurvaLqi(config.lqiCurveFile);
+	criterio.lqiMinimo = config.minLqiParent;
+	criterio.snrMinimo = config.minSnrParent;
+	criterio.maxFilhos = config.maxChildren;
+	NS_ABORT_MSG_IF(config.parentPreference != "saltos" && config.parentPreference != "sinal",
+			"ParentPreference deve ser saltos ou sinal");
+	criterio.preferirMenosSaltos = (config.parentPreference == "saltos");
+	criterio.larguraMhz = getBandwidth(config.DataMode);
+	MontarArvore(topo, criterio);
+	if (!topo.relays.empty()) ImprimirResumoArvore(topo);
+	g_paiDe = topo.paiInstalacao;
+	g_ehRelay.assign(topo.sta.size(), false);
+	for (int r : topo.relays) g_ehRelay[r] = true;
+	ExportarTopologiaCsv("resultado_topologia.csv", topo);
 
     configureRAW(config.rps, config.RAWConfigFile);
 	// config.Nsta = config.NRawSta;
@@ -1226,13 +1326,24 @@ int main(int argc, char *argv[]) {
 
 	YansWifiChannelHelper channelBuilder = YansWifiChannelHelper();
 	channelBuilder.AddPropagationLoss("ns3::LogDistancePropagationLossModel",
-			"Exponent", DoubleValue(3.76), "ReferenceLoss", DoubleValue(8.0),
-			"ReferenceDistance", DoubleValue(1.0));
+			"Exponent", DoubleValue(PROP_EXPOENTE), "ReferenceLoss", DoubleValue(PROP_PERDA_REFERENCIA_DB),
+			"ReferenceDistance", DoubleValue(PROP_DISTANCIA_REFERENCIA_M));
 	channelBuilder.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
 
 	Ptr<YansWifiChannel> channel1 = channelBuilder.Create(); // salto compartilhado: AP raiz <-> STA dos relays
 
 	channel1->TraceConnectWithoutContext("Transmission", MakeCallback(&onChannelTransmission));
+
+	// Cada relay tem seu BSS em um canal próprio (como canais HaLow diferentes):
+	// os BSSs não interferem entre si. canalRelay[k] = canal do relay topo.relays[k].
+	std::vector<Ptr<YansWifiChannel> > canalRelay;
+	for (size_t k = 0; k < topo.relays.size(); k++) {
+		canalRelay.push_back(channelBuilder.Create());
+		canalRelay.back()->TraceConnectWithoutContext("Transmission", MakeCallback(&onChannelTransmission));
+	}
+	auto canalDoAp = [&](int ap) {
+		return ap == PAI_GATEWAY ? channel1 : canalRelay[topo.IndiceRelay(ap)];
+	};
 
 	YansWifiPhyHelper phy = YansWifiPhyHelper::Default();
 
@@ -1267,7 +1378,24 @@ int main(int argc, char *argv[]) {
 			BooleanValue(false));
 
 	NetDeviceContainer staDevice;
-	staDevice = wifi.Install(phy, mac, wifiStaNode);
+	auto ssidDoAp = [&](int ap) {
+		return ap == PAI_GATEWAY ? ssid : Ssid("ns380211ah-relay-" + std::to_string(topo.IndiceRelay(ap)));
+	};
+	if (topo.relays.empty()) {
+		staDevice = wifi.Install(phy, mac, wifiStaNode);
+	} else {
+		// Instala nó a nó, na ordem dos índices: o MAC (e portanto o AID) da STA i
+		// continua sendo i+1, dentro da faixa coberta pelo RAW de todos os APs.
+		// No relay, esta é a interface STA (DeviceList/0), ligada ao BSS do pai.
+		for (uint32_t i = 0; i < config.Nsta; i++) {
+			int ap = topo.paiInstalacao[i];
+			mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssidDoAp(ap)),
+					"ActiveProbing", BooleanValue(false));
+			phy.SetChannel(canalDoAp(ap));
+			staDevice.Add(wifi.Install(phy, mac, wifiStaNode.Get(i)));
+		}
+		phy.SetChannel(channel1);
+	}
 
 	// conexão AP: AP --> Relay
 	mac.SetType ("ns3::ApWifiMac",
@@ -1282,11 +1410,44 @@ int main(int argc, char *argv[]) {
 	phy.Set("TxGain", DoubleValue(3.0));
 	phy.Set("RxGain", DoubleValue(3.0));
 	phy.Set("TxPowerLevels", UintegerValue(1));
-	phy.Set("TxPowerEnd", DoubleValue(30.0));
-	phy.Set("TxPowerStart", DoubleValue(30.0));
+	phy.Set("TxPowerEnd", DoubleValue(config.apTxPowerDbm));
+	phy.Set("TxPowerStart", DoubleValue(config.apTxPowerDbm));
 	phy.Set("RxNoiseFigure", DoubleValue(6.8));
 
 	apDevice = wifi.Install(phy, mac, wifiApNode);
+
+	// Lado AP de cada relay: mesmo PHY/RAW/TIM do gateway, SSID e canal próprios.
+	// Fica como DeviceList/1 do nó relay (DeviceList/0 é a STA ligada ao pai).
+	// relayApDevice.Get(k) = AP do relay topo.relays[k].
+	NetDeviceContainer relayApDevice;
+	for (size_t k = 0; k < topo.relays.size(); k++) {
+		mac.SetType ("ns3::ApWifiMac",
+		                 "Ssid", SsidValue (ssidDoAp(topo.relays[k])),
+		                 "BeaconInterval", TimeValue (MicroSeconds(config.BeaconInterval)),
+		                 "NRawStations", UintegerValue (config.NRawSta),
+		                 "RPSsetup", RPSVectorValue (config.rps),
+		                 "PageSliceSet", pageSliceValue (config.pageS),
+		                 "TIMSet", TIMValue (config.tim)
+		               );
+		phy.SetChannel(canalRelay[k]);
+		relayApDevice.Add(wifi.Install(phy, mac, wifiStaNode.Get(topo.relays[k])));
+	}
+	phy.SetChannel(channel1);
+	// Lado STA dos relays: dorme ou não (padrão do módulo: dorme como qualquer STA)
+	for (int r : topo.relays)
+		DynamicCast<WifiNetDevice>(staDevice.Get(r))->GetMac()->SetAttribute(
+				"PowerSaveEnabled", BooleanValue(config.relayStaPowerSave));
+	for (int r : topo.relays)
+		DynamicCast<WifiNetDevice>(staDevice.Get(r))->GetMac()->SetAttribute(
+				"RawExempt", BooleanValue(config.relayStaRawExempt));
+	for (uint32_t k = 0; k < relayApDevice.GetN(); k++) {
+		Ptr<WifiNetDevice> d = DynamicCast<WifiNetDevice>(relayApDevice.Get(k));
+		PointerValue edca;
+		d->GetMac()->GetAttribute("BE_EdcaTxopN", edca);
+		Ptr<WifiMacQueue> fila = edca.Get<EdcaTxopN>()->GetEdcaQueue();
+		fila->SetAttribute("MaxDelay", TimeValue(MilliSeconds(config.relayApQueueMaxDelayMs)));
+		fila->SetAttribute("MaxPacketNumber", UintegerValue(config.relayApQueueMaxPackets));
+	}
 
 	Config::Set(
 			"/NodeList/*/DeviceList/0/$ns3::WifiNetDevice/Mac/$ns3::RegularWifiMac/BE_EdcaTxopN/Queue/MaxPacketNumber",
@@ -1294,6 +1455,20 @@ int main(int argc, char *argv[]) {
 	Config::Set(
 			"/NodeList/*/DeviceList/0/$ns3::WifiNetDevice/Mac/$ns3::RegularWifiMac/BE_EdcaTxopN/Queue/MaxDelay",
 			TimeValue(NanoSeconds(6000000000000)));
+	{
+		// Fila de dados do gateway (por padrão os mesmos 10 pacotes de todo DeviceList/0)
+		PointerValue edca;
+		DynamicCast<WifiNetDevice>(apDevice.Get(0))->GetMac()->GetAttribute("BE_EdcaTxopN", edca);
+		edca.Get<EdcaTxopN>()->GetEdcaQueue()->SetAttribute("MaxPacketNumber",
+				UintegerValue(config.gatewayApQueueMaxPackets));
+	}
+	// Fila de subida do lado STA dos relays (DeviceList/0 do nó relay)
+	for (int r : topo.relays) {
+		PointerValue edca;
+		DynamicCast<WifiNetDevice>(staDevice.Get(r))->GetMac()->GetAttribute("BE_EdcaTxopN", edca);
+		edca.Get<EdcaTxopN>()->GetEdcaQueue()->SetAttribute("MaxPacketNumber",
+				UintegerValue(config.relayStaQueueMaxPackets));
+	}
 /*
 	string DataModeCamera = "OfdmRate650KbpsBW2MHz";
 	StringValue aa = StringValue(DataModeCamera);
@@ -1322,30 +1497,18 @@ int main(int argc, char *argv[]) {
 	Config::ConnectWithoutContext(oss.str() + "RawGroup", MakeCallback(&RawGroupTrace));
 	Config::ConnectWithoutContext(oss.str() + "RawSlot", MakeCallback(&RawSlotTrace));
 
-	// Gateway (AP) = célula (0,0) da matriz
-	double xpos = std::stoi(config.rho, nullptr, 0);
-	double ypos = xpos;
-	double spacing = 100.0;   // distância entre células (m) -> idealmente vira parâmetro
-
+	// Posições vindas da topologia (grid: gateway na célula (0,0) da matriz;
+	// area: gateway no canto inferior direito da área)
 	MobilityHelper mobilityAp;
 	Ptr<ListPositionAllocator> apAlloc = CreateObject<ListPositionAllocator>();
-	apAlloc->Add(Vector(xpos, ypos, 0.0));
+	apAlloc->Add(topo.gateway);
 	mobilityAp.SetPositionAllocator(apAlloc);
 	mobilityAp.SetMobilityModel("ns3::ConstantPositionMobilityModel");
 	mobilityAp.Install(wifiApNode);
-	
-	uint32_t cols = (uint32_t) std::ceil(std::sqrt((double)config.Nsta + 1));
 
 	Ptr<ListPositionAllocator> staAlloc = CreateObject<ListPositionAllocator>();
-	uint32_t flag = 0;
-	for (uint32_t linha = 0; flag < config.Nsta; linha++) {
-		for (uint32_t coluna = 0; coluna < cols && flag < config.Nsta; coluna++) {
-			if (linha == 0 && coluna == 0) continue;   // célula do gateway
-			staAlloc->Add(Vector(xpos + coluna * spacing,
-								ypos + linha * spacing, 0.0));
-			flag++;
-		}
-	}
+	for (const Vector& p : topo.sta)
+		staAlloc->Add(p);
 
 	MobilityHelper mobilitySta;
 	mobilitySta.SetPositionAllocator(staAlloc);
@@ -1394,14 +1557,76 @@ int main(int argc, char *argv[]) {
 
 	Ipv4AddressHelper address;
 
-	address.SetBase("10.0.0.0", "255.0.0.0"); // uplink, único, compartilhado
-	staNodeInterface = address.Assign(staDevice);
-	apNodeInterface  = address.Assign(apDevice);
+	if (topo.relays.empty()) {
+		address.SetBase("10.0.0.0", "255.0.0.0"); // uplink, único, compartilhado
+		staNodeInterface = address.Assign(staDevice);
+		apNodeInterface  = address.Assign(apDevice);
+	} else {
+		// Uma sub-rede por BSS: 10.1.0.0/16 (gateway) e 10.(2+k).0.0/16 (relay k).
+		// staNodeInterface fica na ordem dos índices das STAs (usado em getSTAIdFromAddress).
+		NS_ABORT_MSG_IF(topo.relays.size() > 250, "Endereçamento suporta até 250 relays");
+		auto redeDoAp = [&](int ap) {
+			int octeto = (ap == PAI_GATEWAY) ? 1 : 2 + topo.IndiceRelay(ap);
+			return "10." + std::to_string(octeto) + ".0.0";
+		};
+		std::map<int, Ipv4AddressHelper> addrDoAp;
+		addrDoAp[PAI_GATEWAY].SetBase(redeDoAp(PAI_GATEWAY).c_str(), "255.255.0.0");
+		for (int r : topo.relays) addrDoAp[r].SetBase(redeDoAp(r).c_str(), "255.255.0.0");
+
+		for (uint32_t i = 0; i < config.Nsta; i++)
+			staNodeInterface.Add(addrDoAp[topo.paiInstalacao[i]].Assign(NetDeviceContainer(staDevice.Get(i))));
+		apNodeInterface = addrDoAp[PAI_GATEWAY].Assign(apDevice);
+		std::map<int, Ipv4Address> ipDoAp;   // endereço da interface AP de cada AP
+		ipDoAp[PAI_GATEWAY] = apNodeInterface.GetAddress(0);
+		for (size_t k = 0; k < topo.relays.size(); k++)
+			ipDoAp[topo.relays[k]] = addrDoAp[topo.relays[k]].Assign(NetDeviceContainer(relayApDevice.Get(k))).GetAddress(0);
+
+		// Rotas estáticas. Interface 1 = primeiro rádio Wi-Fi do nó (no relay, a STA);
+		// interface 2 do relay = seu AP; interface 1 do gateway = seu AP.
+		Ipv4StaticRoutingHelper srh;
+		auto rotasDoAp = [&](int ap) {
+			Ptr<Node> no = (ap == PAI_GATEWAY) ? wifiApNode.Get(0) : wifiStaNode.Get(ap);
+			return srh.GetStaticRouting(no->GetObject<Ipv4>());
+		};
+		// subida: todo nó (inclusive relay) usa o AP do pai como rota padrão
+		for (uint32_t i = 0; i < config.Nsta; i++)
+			srh.GetStaticRouting(wifiStaNode.Get(i)->GetObject<Ipv4>())
+				->SetDefaultRoute(ipDoAp[topo.paiInstalacao[i]], 1);
+		// descida: cada AP no caminho até o gateway aprende a sub-rede de cada relay
+		// abaixo dele, com próximo salto = o filho (relay) que leva até ela
+		for (int r : topo.relays) {
+			int filho = r, ap = topo.paiInstalacao[r];
+			for (uint32_t guarda = 0; guarda <= topo.relays.size(); guarda++) {
+				rotasDoAp(ap)->AddNetworkRouteTo(Ipv4Address(redeDoAp(r).c_str()), Ipv4Mask("255.255.0.0"),
+						staNodeInterface.GetAddress(filho), ap == PAI_GATEWAY ? 1 : 2);
+				if (ap == PAI_GATEWAY) break;
+				filho = ap;
+				ap = topo.paiInstalacao[ap];
+			}
+		}
+	}
 
 	allNodes.Add(wifiStaNode);
 	allNodes.Add(wifiApNode);
 
+	if (config.traceAccessNode >= 0 && config.traceAccessNode < (int) config.Nsta) {
+		g_traceAcesso.open("resultado_access_trace.csv");
+		g_traceAcesso << "time_us,code" << std::endl;
+		Ptr<WifiNetDevice> d = DynamicCast<WifiNetDevice>(staDevice.Get(config.traceAccessNode));
+		PointerValue edca;
+		d->GetMac()->GetAttribute("BE_EdcaTxopN", edca);
+		edca.Get<EdcaTxopN>()->TraceConnectWithoutContext("AccessQuest_record", MakeCallback(&TraceAcessoEdca));
+		d->GetPhy()->TraceConnectWithoutContext("PhyTxBegin", MakeCallback(&TraceAcessoTx));
+		PointerValue estado;
+		d->GetPhy()->GetAttribute("State", estado);
+		estado.Get<WifiPhyStateHelper>()->TraceConnectWithoutContext("State", MakeCallback(&TraceAcessoEstado));
+	}
+	g_logRadioSamples = config.monitorRadioSamples;
+	g_logPacketRecords = config.monitorPacketRecords;
 	InstalarSniffers(allNodes, wifiApNode.Get(0)->GetId());
+	for (uint32_t i = 0; i < config.Nsta; i++)
+		if (topo.paiInstalacao[i] >= 0)
+			DefinirPai(wifiStaNode.Get(i)->GetId(), wifiStaNode.Get(topo.paiInstalacao[i])->GetId());
 
 	//trace association
 	std::cout << "Configuring trace sources..." << std::endl;

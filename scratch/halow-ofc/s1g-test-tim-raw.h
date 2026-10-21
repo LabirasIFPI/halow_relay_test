@@ -74,6 +74,7 @@ void configureUDPServer();
 void configureUDPClients();
 
 void configureUDPEchoClients();
+void startUDPEchoClientIfReady(int i);
 void configureUDPEchoServer();
 void configureUdpEchoClientHelper(UdpEchoClientHelper& clientHelper);
 

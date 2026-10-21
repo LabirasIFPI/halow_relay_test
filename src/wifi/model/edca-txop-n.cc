@@ -515,6 +515,8 @@ EdcaTxopN::NotifyAccessGranted (void)
   //Time remainingRawTime = m_rawDuration - (Simulator::Now() - m_rawStartedAt);
   if (!AccessIfRaw)
     {
+        // diagnóstico: acesso concedido enquanto bloqueado pelo RAW -> desperdiçado
+        m_AccessQuest_record (Simulator::Now ().GetMicroSeconds (), 98);
         return;
     }
    //NS_LOG_UNCOND ("EdcaTxopN::NotifyAccessGranted, " << Simulator::Now ()<< ", " << m_low->GetAddress ());
@@ -1099,6 +1101,8 @@ void
 EdcaTxopN::AccessAllowedIfRaw (bool allowed)
 {
   AccessIfRaw = allowed;
+  // diagnóstico: 1 = acesso liberado (dentro do RAW / fora dele), 0 = bloqueado
+  m_AccessQuest_record (Simulator::Now ().GetMicroSeconds (), allowed ? 1 : 0);
     /*if (Simulator::Now ().GetMicroSeconds () > 50000000)
     {
          NS_LOG_UNCOND ("EdcaTxopN::NotifyAccessGranted, " << Simulator::Now () << ", " << allowed << ", " << m_low->GetAddress ());
@@ -1144,7 +1148,13 @@ EdcaTxopN::StartAccessIfNeededRaw (void)
         && !m_dcf->IsAccessRequested ()
         && AccessIfRaw)    // always TRUE outside RAW
     {
+        m_AccessQuest_record (Simulator::Now ().GetMicroSeconds (), 40); // diagnóstico: pedido no início do RAW
         m_manager->RequestAccess (m_dcf);
+    }
+    else if ((!m_queue->IsEmpty () || m_currentPacket != 0) && AccessIfRaw && m_dcf->IsAccessRequested ())
+    {
+        // diagnóstico: há pacote e acesso liberado, mas já existe um pedido pendente
+        m_AccessQuest_record (Simulator::Now ().GetMicroSeconds (), 41);
     }
 }
 
