@@ -18,7 +18,8 @@ Entre os principais arquivos estão:
 | `s1g-test-tim-raw.h` | Declarações e funções auxiliares relacionadas ao cenário de simulação. |
 | `Configuration.h` | Define os parâmetros de configuração da simulação. |
 | `Configuration.cc` | Processa os argumentos recebidos pela linha de comando. |
-| `monitor.h` | Implementa a coleta de métricas de rádio e pacotes e a exportação dos resultados em CSV. |
+| `monitor/` | Coleta de métricas e exportação em CSV. `monitor.h` é o ponto de entrada; `base.h` tem o comum; `monitor_enlace.h` mede cada enlace filho → pai (`link_frame_summary`); `monitor_trafego.h` mede pacotes e fluxos (`flow_summary`, `node_summary`). |
+| `tree/` | Árvore de relays. `topologia.h` decide a árvore antes da simulação (grade, relays e pai de cada nó); `radio.h` prevê o SNR de um enlace; `lqi.h` lê a curva de LQI e converte SNR em LQI; `instalar_relays.h` constrói essa árvore no ns-3 (canais, rádios dos dois lados de cada relay, filas, posições, endereços IP e rotas). |
 | `NodeEntry.h` / `NodeEntry.cc` | Mantêm informações e callbacks associados às estações. |
 | `NodeStatistics.h` / `NodeStatistics.cc` | Armazenam estatísticas de cada nó. |
 | `Statistics.h` / `Statistics.cc` | Organizam as estatísticas gerais da simulação. |
@@ -63,35 +64,67 @@ Portanto, a implementação atual configura uma rede IP compartilhada entre o AP
 
 ### Monitoramento da rede
 
-O arquivo `monitor.h` implementa funções para acompanhar o comportamento da comunicação e exportar os resultados ao final da execução.
+Os arquivos da pasta `monitor/` implementam funções para acompanhar o comportamento da comunicação e exportar os resultados ao final da execução.
 
 As principais métricas incluem:
 
 - **RSSI:** potência do sinal recebido, em dBm.
 - **Ruído e SNR:** nível de ruído e relação sinal-ruído.
-- **Qualidade estimada do enlace:** valores normalizados derivados de RSSI e SNR.
+- **Entrega por enlace:** quadros enviados e decodificados em cada enlace filho → pai (base do LQI calibrado por PDR).
 - **Distância até o AP central:** distância geométrica calculada a partir dos modelos de mobilidade.
-- **Pacotes IP:** eventos de transmissão, encaminhamento, recepção e entrega à aplicação.
 - **Estatísticas de fluxo:** pacotes enviados e recebidos, bytes, atrasos e saltos, quando aplicáveis.
 - **Energia estimada:** estimativas de energia associadas aos eventos de transmissão e recepção IP.
 
-**Observação:** os valores de qualidade de enlace são aproximações heurísticas, não uma medição padronizada de LQI do IEEE 802.11ah. Da mesma forma, o consumo energético calculado pelo monitor é uma estimativa baseada em potência e tempo de transmissão, não uma medição realizada pelo framework de energia do NS-3.
+**Observação:** o consumo energético calculado pelo monitor é uma estimativa baseada em potência e tempo de transmissão, não uma medição realizada pelo framework de energia do NS-3.
 
 ## Como executar?
 
-Os comandos abaixo pressupõem que o NS-3 já esteja configurado e compilado no ambiente utilizado pelo projeto.
+O ns-3.23 precisa de um Linux antigo (Python 2 e GCC antigo), por isso a simulação roda dentro de um container Docker. Pré-requisitos: Docker Desktop aberto e, para o visualizador, Node.js.
 
-A partir da raiz do repositório, compile o projeto:
-
-```bash
-./waf
-```
-
-Para executar o cenário com dez estações e tráfego UDP Echo:
+**1. Preparar (uma vez).** Na raiz do repositório, pelo Git Bash, WSL ou Linux:
 
 ```bash
-./waf --run "halow-ofc --Nsta=10 --NRawSta=10 --TrafficType=udpecho"
+./setup_ns3_halow.sh
 ```
+
+Ele cria a imagem `ns3-halow-env` (a partir do `Dockerfile` da raiz), configura e compila este repositório dentro do container e instala as dependências do `ahVisualizer`.
+
+**2. Abrir um terminal no container**, com a pasta do repositório montada em `/workspace/relay-halow-tree`:
+
+```bash
+docker run -it --name ns3-relay-tree -v "$(pwd):/workspace/relay-halow-tree" -w /workspace/relay-halow-tree ns3-halow-env
+```
+
+No Git Bash, prefixe o comando com `MSYS_NO_PATHCONV=1`; no PowerShell, troque `$(pwd)` por `${PWD}`. Nas próximas vezes, use `docker start -ai ns3-relay-tree`.
+
+**3. Dentro do container**, compile depois de cada mudança no código, gere o arquivo de RAW e rode:
+
+```bash
+./waf build
+./waf --run "RAW-generate --NRawSta=10 --NGroup=1 --NumSlot=1 --beaconinterval=102400 --pageSliceCount=0 --pageSliceLen=1 --RAWConfigPath=OptimalRawGroup/RawConfig-10.txt"
+./waf --run "halow-ofc --Nsta=10 --NRawSta=10 --TrafficType=udpecho --RAWConfigFile=OptimalRawGroup/RawConfig-10.txt --VisualizerIP=none"
+```
+
+O arquivo de RAW diz quantos grupos e slots RAW existem e quais AIDs ficam em cada um. A pasta `OptimalRawGroup/` está no `.gitignore`, então o arquivo precisa ser gerado em cada máquina, com `--NRawSta` igual ao número de nós da simulação. Sem ele, o simulador para com a mensagem "Unable to open RAW configuration file".
+
+O `--VisualizerIP=none` desliga o envio ao visualizador. Sem ele, o simulador tenta o `localhost` do container e repete "Connecting to visualizer" / "Connection refused" durante toda a rodada (não afeta os resultados).
+
+As rodadas do estudo de LQI e relays usam o `scratch/halow-ofc/rodar_lqi.sh`, que gera o `RawConfig.txt` e grava tudo em `results/lqi/<nome>/` (exemplo: `scratch/halow-ofc/rodar_lqi.sh teste 24 50 2 2 40 1 --Topology=area --AreaSize=200 --Relays=1 --VisualizerIP=none`).
+
+**4. Visualizador (opcional).** No Windows, fora do container:
+
+```bash
+cd ahVisualizer/forwardsocketdata
+node index.js
+```
+
+Abra http://localhost:8080 e, no container, rode a simulação trocando `--VisualizerIP=none` por `--VisualizerIP=host.docker.internal` (dentro do container, `localhost` é o próprio container):
+
+```bash
+./waf --run "halow-ofc --Nsta=10 --NRawSta=10 --TrafficType=udpecho --RAWConfigFile=OptimalRawGroup/RawConfig-10.txt --VisualizerIP=host.docker.internal"
+```
+
+Cada execução também grava um arquivo `.nss` em `results/`, que o visualizador reproduz depois.
 
 O parâmetro `Nsta` define a quantidade de estações. `NRawSta` configura a quantidade de estações consideradas pelo AP para a configuração RAW. `TrafficType` seleciona o tipo de tráfego.
 
@@ -117,16 +150,14 @@ O código também depende de arquivos de configuração RAW e de diretórios de 
 
 Ao final da simulação, o código chama `ExportarTudo("resultado", config.simulationTime)`, que exporta arquivos CSV com o prefixo `resultado`.
 
-Os arquivos gerados pelo monitor são:
+Os arquivos gerados são:
 
 | Arquivo | Conteúdo |
 |---|---|
-| `resultado_radio_rx_samples.csv` | Amostras de recepção na camada física, incluindo RSSI, ruído e SNR. |
-| `resultado_link_ap_summary.csv` | Resumo dos enlaces em relação ao AP central, incluindo distância e estatísticas de sinal. |
-| `resultado_ip_packet_events.csv` | Eventos de pacotes observados na camada IP. |
+| `resultado_topologia.csv` | Árvore montada antes da simulação (`tree/topologia.h`): posição, papel, pai, saltos, SNR e LQI previstos de cada STA. |
+| `resultado_link_frame_summary.csv` | Quadros enviados e decodificados, PDR e SNR de cada enlace filho → pai. É a entrada do `calibrar_lqi.py`. |
 | `resultado_flow_summary.csv` | Estatísticas agregadas dos fluxos de tráfego. |
-| `resultado_node_summary.csv` | Estatísticas agregadas por nó. |
-| `resultado_simulation_summary.csv` | Resumo geral da simulação. |
+| `resultado_node_summary.csv` | Estatísticas agregadas por nó, incluindo a RAW de cada nó. |
 
 A localização efetiva dos CSVs depende do diretório de trabalho a partir do qual a simulação é executada.
 

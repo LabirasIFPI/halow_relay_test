@@ -1,0 +1,35 @@
+# Normaliza finais de linha: a arvore de trabalho usa sempre LF.
+# Sem isso, core.autocrlf=true no Windows converte tudo para CRLF no checkout e
+# quebra o build dentro do container Linux: "./waf" falha com
+# "bad interpreter: /usr/bin/env python^M", scripts .sh idem, e os arquivos de
+# configuracao de RAW sao lidos com \r no fim de cada campo.
+* text=auto eol=lf
+
+# Arquivos executados diretamente dentro do container: LF obrigatorio.
+waf           text eol=lf
+*.sh          text eol=lf
+*.py          text eol=lf
+*.pbs         text eol=lf
+Makefile      text eol=lf
+Dockerfile    text eol=lf
+wscript       text eol=lf
+
+# Fontes e dados do simulador.
+*.cc          text eol=lf
+*.h           text eol=lf
+*.txt         text eol=lf
+*.md          text eol=lf
+
+# Scripts especificos do Windows mantem CRLF.
+*.bat         text eol=crlf
+*.cmd         text eol=crlf
+
+# Binarios: nunca converter.
+*.pcap        binary
+*.nss         binary
+*.zip         binary
+*.o           binary
+*.so          binary
+*.pyc         binary
+*.png         binary
+*.pdf         binary

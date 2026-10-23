@@ -9,3 +9,5 @@ udpecho*
 tcpsensor*
 OptimalRawGroup/
 results/
+# dependências do ahVisualizer (recriadas com npm install)
+ahVisualizer/forwardsocketdata/node_modules/

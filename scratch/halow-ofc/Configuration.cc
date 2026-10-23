@@ -47,7 +47,6 @@ Configuration::Configuration(int argc, char *argv[]) {
     cmd.AddValue("MinSnrParent", "Minimum predicted uplink SNR (dB) for a valid parent link (without LqiCurveFile)", minSnrParent);
     cmd.AddValue("ParentPreference", "saltos = fewest hops to the gateway first (then LQI, SNR); sinal = best LQI/SNR regardless of hops", parentPreference);
     cmd.AddValue("RelayStaQueueMaxPackets", "Max packets in the STA-side (uplink) data queue of relays (scenario default 10)", relayStaQueueMaxPackets);
-    cmd.AddValue("TraceAccessNode", "STA index whose channel-access events are written to resultado_access_trace.csv (-1 = off)", traceAccessNode);
     cmd.AddValue("RelayStaRawExempt", "If true, RAW does not restrict channel access of the STA side of relays", relayStaRawExempt);
     cmd.AddValue("RelayStaPowerSave", "If false, the STA side of relays never sleeps", relayStaPowerSave);
     cmd.AddValue("RelayApQueueMaxDelay", "Max time (ms) a data packet waits in a relay AP queue before being dropped (ns-3 default 500)", relayApQueueMaxDelayMs);
@@ -56,8 +55,9 @@ Configuration::Configuration(int argc, char *argv[]) {
     cmd.AddValue("MaxChildren", "Maximum children per AP (gateway or relay); 0 = unlimited", maxChildren);
     cmd.AddValue("APTxPower", "AP transmit power in dBm (30 = original, 0 = symmetric link with the STAs)", apTxPowerDbm);
     cmd.AddValue("MinBeaconRssiForAssoc", "STA only associates if the beacon arrives at or above this power in dBm (-1000 = off)", minBeaconRssiForAssoc);
-    cmd.AddValue("MonitorRadioSamples", "Keep every received frame in memory and export radio_rx_samples.csv", monitorRadioSamples);
-    cmd.AddValue("MonitorPacketRecords", "Keep every IP event in memory and export ip_packet_events.csv", monitorPacketRecords);
+    cmd.AddValue("VisualizerIP", "IP or hostname for the visualizer server, leave empty to not send data", visualizerIP);
+    cmd.AddValue("VisualizerPort", "Port for the visualizer server", visualizerPort);
+    cmd.AddValue("VisualizerSamplingInterval", "Sampling interval of statistics in seconds", visualizerSamplingInterval);
 
 /*
     cmd.AddValue("SlotFormat", "format of NRawSlotCount, -1 will auto calculate based on raw slot num", SlotFormat);
@@ -104,9 +104,6 @@ Configuration::Configuration(int argc, char *argv[]) {
     cmd.AddValue("PropagationLossExponent", "exponent gamma of the log propagation model, default values are outdoors", propagationLossExponent);
     cmd.AddValue("PropagationLossReferenceLoss", "reference loss of the log propagation model", propagationLossReferenceLoss);
 
-    cmd.AddValue("VisualizerIP", "IP or hostname for the visualizer server, leave empty to not send data", visualizerIP);
-    cmd.AddValue("VisualizerPort", "Port for the visualizer server", visualizerPort);
-    cmd.AddValue("VisualizerSamplingInterval", "Sampling interval of statistics in seconds", visualizerSamplingInterval);
 
 
     cmd.AddValue("APPcapFile", "Name of the pcap file to generate at the AP, leave empty to omit generation", APPcapFile);

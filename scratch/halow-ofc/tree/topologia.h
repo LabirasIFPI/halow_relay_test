@@ -1,29 +1,11 @@
 #ifndef TOPOLOGIA_H
 #define TOPOLOGIA_H
 
-// ============================================================
-// topologia.h - Posições dos nós e montagem da árvore (gateway + relays)
-//
-//  "grid": matriz a partir do gateway (comportamento original do halow-ofc).
-//  "area": matriz que preenche uma área quadrada; gateway no canto inferior
-//          direito e relays em posições fixas (ou um relay no centro).
-//
-// Os relays são DADOS (posições fixas); a escolha de quais nós viram relays
-// fica para um algoritmo próprio. Aqui só se decide a qual AP cada nó se liga,
-// antes da simulação, pelo enlace de uplink previsto (mesmo modelo de
-// propagação do canal):
-//   - enlace válido: LQI previsto >= LQI mínimo (curva calibrada do
-//     calibrar_lqi.py) ou, sem curva, SNR previsto >= SNR mínimo;
-//   - preferência "saltos" (padrão): pai = AP válido com MENOS saltos até o
-//     gateway; empate -> maior LQI; empate -> maior SNR;
-//   - preferência "sinal": pai = AP válido com maior LQI; empate -> maior SNR
-//     (ignora saltos; foi a regra do primeiro teste da Krisna);
-//   - opcionalmente respeitando um máximo de filhos por AP.
-// Relays se ligam primeiro (por nível, a partir do gateway), depois as STAs.
-// ============================================================
-
 #include "ns3/core-module.h"
 #include "ns3/mobility-module.h"
+
+#include "radio.h"
+#include "lqi.h"
 
 #include <cmath>
 #include <fstream>
@@ -36,40 +18,57 @@
 
 using namespace ns3;
 
-// Mesmos parâmetros do canal (LogDistancePropagationLossModel no main)
-const double PROP_EXPOENTE = 3.76;
-const double PROP_PERDA_REFERENCIA_DB = 8.0;
-const double PROP_DISTANCIA_REFERENCIA_M = 1.0;
+const int PAI_GATEWAY = -1;
+const int SEM_COBERTURA = -2;
 
-const int PAI_GATEWAY = -1;     // pai[i] == PAI_GATEWAY: ligado ao gateway
-const int SEM_COBERTURA = -2;   // nenhum AP com enlace válido
-
+/**
+ * @brief Posições dos nós e árvore de ligação até o gateway, decididas antes da simulação.
+ *
+ */
 struct Topologia
 {
     Vector gateway;
-    std::vector<Vector> sta;          // posição de cada STA (índice = nó)
-    std::vector<int> relays;          // índices das STAs que também são relays
-    std::vector<int> pai;             // PAI_GATEWAY, índice do relay pai ou SEM_COBERTURA
-    std::vector<int> saltos;          // saltos até o gateway (0 = sem cobertura)
-    std::vector<double> snrPai;       // SNR de uplink previsto até o pai (dB)
-    std::vector<double> lqiPai;       // LQI previsto até o pai (-1 = sem curva)
-    std::vector<int> paiInstalacao;   // AP cujo SSID/canal o nó usa: o pai ou, sem
-                                      // cobertura, o AP conectado mais próximo
+    std::vector<Vector> sta;
+    std::vector<int> relays;
+    std::vector<int> pai;
+    std::vector<int> saltos;
+    std::vector<double> snrPai;
+    std::vector<double> lqiPai;
+    std::vector<int> paiInstalacao;
 
+    /**
+     * @brief Indica se a STA i é um relay.
+     */
     bool EhRelay(int i) const
     {
         for (int r : relays) if (r == i) return true;
         return false;
     }
-    int IndiceRelay(int i) const      // posição do relay na lista (-1 se não é relay)
+    /**
+     * @brief Posição da STA i na lista de relays (-1 se não for relay).
+     */
+    int IndiceRelay(int i) const
     {
         for (size_t k = 0; k < relays.size(); k++) if (relays[k] == i) return (int) k;
         return -1;
     }
+    /**
+     * @brief Indica se a STA i tem caminho até o gateway.
+     */
     bool Conectado(int i) const { return pai[i] != SEM_COBERTURA; }
 };
 
-// Matriz a partir do gateway em (x0, y0), preenchida linha a linha (original).
+/**
+ * @brief Topologia "grid": matriz a partir do gateway, preenchida linha a linha
+ *        (comportamento original do halow-ofc).
+ *
+ * A célula (0, 0) da matriz é do gateway e fica sem STA.
+ * @param nsta Número de STAs.
+ * @param x0 Posição x do gateway (m).
+ * @param y0 Posição y do gateway (m).
+ * @param spacing Distância entre nós vizinhos (m).
+ * @return Topologia com o gateway e as STAs, sem relays.
+ */
 inline Topologia MontarTopologiaGrid(uint32_t nsta, double x0, double y0, double spacing)
 {
     Topologia t;
@@ -77,13 +76,17 @@ inline Topologia MontarTopologiaGrid(uint32_t nsta, double x0, double y0, double
     uint32_t cols = (uint32_t) std::ceil(std::sqrt((double) nsta + 1));
     for (uint32_t linha = 0; t.sta.size() < nsta; linha++)
         for (uint32_t coluna = 0; coluna < cols && t.sta.size() < nsta; coluna++) {
-            if (linha == 0 && coluna == 0) continue;   // célula do gateway
+            if (linha == 0 && coluna == 0) continue;
             t.sta.push_back(Vector(x0 + coluna * spacing, y0 + linha * spacing, 0.0));
         }
     return t;
 }
 
-// "x1,y1;x2,y2;..." -> lista de posições
+/**
+ * @brief Converte o texto "x1,y1;x2,y2;..." em uma lista de posições.
+ * @param texto Posições em metros, separadas por ponto e vírgula.
+ * @return Posições lidas; pares sem vírgula são ignorados.
+ */
 inline std::vector<Vector> LerPosicoes(const std::string& texto)
 {
     std::vector<Vector> pos;
@@ -97,6 +100,12 @@ inline std::vector<Vector> LerPosicoes(const std::string& texto)
     return pos;
 }
 
+/**
+ * @brief Encontra o ponto mais próximo de uma posição.
+ * @param pts Pontos candidatos.
+ * @param alvo Posição de referência.
+ * @return Índice do ponto mais próximo, ou -1 se a lista estiver vazia.
+ */
 inline int PontoMaisProximo(const std::vector<Vector>& pts, const Vector& alvo)
 {
     int melhor = -1;
@@ -108,9 +117,18 @@ inline int PontoMaisProximo(const std::vector<Vector>& pts, const Vector& alvo)
     return melhor;
 }
 
-// Matriz que cobre [0, area] x [0, area]; gateway em (area, 0).
-// Relays: posições fixas (cada uma vira o nó da matriz mais próximo) ou,
-// sem posições e com numRelays >= 1, um relay no centro.
+/**
+ * @brief Topologia "area": matriz que cobre [0, area] x [0, area], com o gateway
+ *        no canto inferior direito (area, 0).
+ *
+ * Os relays são dados, não escolhidos: cada posição fixa vira o nó da matriz
+ * mais próximo. Sem posições e com numRelays >= 1, põe um relay no centro.
+ * @param area Lado da área quadrada (m).
+ * @param spacing Distância entre nós vizinhos (m).
+ * @param numRelays Usado só sem posições: 0 = só o gateway, >= 1 = um relay no centro.
+ * @param posicoesRelays Posições fixas dos relays, "x1,y1;x2,y2;..." (m).
+ * @return Topologia com o gateway, as STAs e os relays (ainda sem pais).
+ */
 inline Topologia MontarTopologiaArea(double area, double spacing, uint32_t numRelays,
                                      const std::string& posicoesRelays)
 {
@@ -134,68 +152,36 @@ inline Topologia MontarTopologiaArea(double area, double spacing, uint32_t numRe
     return t;
 }
 
-// SNR de uplink na mesma escala que o PHY usa (ruído térmico + figura de ruído).
-inline double PreverSnrUplinkDb(const Vector& a, const Vector& b, double txDbm, double txGainDb,
-                                double rxGainDb, double larguraMhz, double figuraRuidoDb)
-{
-    double d = CalculateDistance(a, b);
-    double perda = PROP_PERDA_REFERENCIA_DB;
-    if (d > PROP_DISTANCIA_REFERENCIA_M)
-        perda += 10.0 * PROP_EXPOENTE * std::log10(d / PROP_DISTANCIA_REFERENCIA_M);
-    double rx = txDbm + txGainDb + rxGainDb - perda;
-    double ruido = -174.0 + 10.0 * std::log10(larguraMhz * 1e6) + figuraRuidoDb;
-    return rx - ruido;
-}
-
-// Lê curva_lqi.csv (snr_uplink_db,pdr,lqi_0_100). Vazia se o arquivo não abrir.
-inline std::vector<std::pair<double, double> > LerCurvaLqi(const std::string& arquivo)
-{
-    std::vector<std::pair<double, double> > curva;
-    if (arquivo.empty()) return curva;
-    std::ifstream in(arquivo.c_str());
-    if (!in.is_open()) {
-        std::cout << "AVISO: não foi possível abrir a curva de LQI " << arquivo
-                  << "; os enlaces serão avaliados pelo SNR." << std::endl;
-        return curva;
-    }
-    std::string linha;
-    std::getline(in, linha); // cabeçalho
-    while (std::getline(in, linha)) {
-        std::stringstream ss(linha);
-        std::string snr, pdr, lqi;
-        if (std::getline(ss, snr, ',') && std::getline(ss, pdr, ',') && std::getline(ss, lqi, ','))
-            curva.push_back(std::make_pair(std::stod(snr), std::stod(lqi)));
-    }
-    return curva;
-}
-
-inline double AvaliarCurvaLqi(const std::vector<std::pair<double, double> >& curva, double snr)
-{
-    if (curva.empty()) return -1.0;
-    if (snr <= curva.front().first) return curva.front().second;
-    if (snr >= curva.back().first) return curva.back().second;
-    for (size_t i = 1; i < curva.size(); i++)
-        if (snr <= curva[i].first) {
-            double s0 = curva[i - 1].first, s1 = curva[i].first;
-            double l0 = curva[i - 1].second, l1 = curva[i].second;
-            return s1 == s0 ? l0 : l0 + (l1 - l0) * (snr - s0) / (s1 - s0);
-        }
-    return curva.back().second;
-}
-
+/**
+ * @brief Regras para aceitar um enlace filho -> pai e escolher o pai.
+ *
+ *  - curva: curva de LQI do calibrar_lqi.py; vazia = avalia pelo SNR.
+ *  - lqiMinimo: LQI previsto mínimo para o enlace valer (com curva).
+ *  - snrMinimo: SNR previsto mínimo (dB), usado só sem curva.
+ *  - maxFilhos: máximo de filhos por AP (0 = sem limite).
+ *  - preferirMenosSaltos: true = regra "saltos"; false = regra "sinal".
+ *  - Rádio usado na previsão: STA a staTxDbm com ganho staTxGainDb; AP
+ *    (gateway e relay) com ganho de recepção apRxGainDb; banda larguraMhz e
+ *    figura de ruído figuraRuidoDb.
+ */
 struct CriterioEnlace
 {
-    std::vector<std::pair<double, double> > curva; // vazia = avalia pelo SNR
-    double lqiMinimo = 80.0;     // com curva
-    double snrMinimo = 1.0;      // sem curva (dB)
-    uint32_t maxFilhos = 0;      // 0 = sem limite
-    bool preferirMenosSaltos = true; // false = preferência "sinal"
-    // rádio: STA 0 dBm / ganho TX 0 dB; AP (gateway e relay) ganho RX 3 dB
+    std::vector<std::pair<double, double> > curva;
+    double lqiMinimo = 80.0;
+    double snrMinimo = 1.0;
+    uint32_t maxFilhos = 0;
+    bool preferirMenosSaltos = true;
     double staTxDbm = 0.0, staTxGainDb = 0.0, apRxGainDb = 3.0;
     double larguraMhz = 2.0, figuraRuidoDb = 6.8;
 };
 
-// Monta a árvore: relays por nível a partir do gateway, depois as STAs.
+/**
+ * @brief Decide o pai de cada nó, antes da simulação, pelo enlace de uplink previsto.
+ *
+ * @param t Topologia com posições e relays; recebe pai, saltos, snrPai,
+ *          lqiPai e paiInstalacao.
+ * @param c Critério de enlace.
+ */
 inline void MontarArvore(Topologia& t, const CriterioEnlace& c)
 {
     const int n = (int) t.sta.size();
@@ -211,7 +197,6 @@ inline void MontarArvore(Topologia& t, const CriterioEnlace& c)
         if (c.maxFilhos == 0) return false;
         return (ap == PAI_GATEWAY ? filhosGateway[0] : filhosRelay[ap]) >= c.maxFilhos;
     };
-    // Escolhe o melhor pai para o nó i entre os APs disponíveis
     auto escolher = [&](int i, const std::vector<int>& aps) {
         int melhor = SEM_COBERTURA;
         double melhorLqi = -1e9, melhorSnr = -1e9;
@@ -238,7 +223,6 @@ inline void MontarArvore(Topologia& t, const CriterioEnlace& c)
         }
     };
 
-    // 1) Backbone: relays ligados nível a nível (BFS a partir do gateway)
     std::vector<int> conectados(1, PAI_GATEWAY);
     std::vector<int> pendentes = t.relays;
     bool progrediu = true;
@@ -254,12 +238,9 @@ inline void MontarArvore(Topologia& t, const CriterioEnlace& c)
         pendentes = resto;
     }
 
-    // 2) STAs comuns se ligam ao melhor AP conectado (gateway ou relay)
     for (int i = 0; i < n; i++)
         if (!t.EhRelay(i)) escolher(i, conectados);
 
-    // 3) Nós sem cobertura ficam no SSID do AP conectado mais próximo (não vão
-    //    associar: o limiar de beacon os impede de insistir)
     t.paiInstalacao = t.pai;
     for (int i = 0; i < n; i++) {
         if (t.Conectado(i)) continue;
@@ -272,6 +253,10 @@ inline void MontarArvore(Topologia& t, const CriterioEnlace& c)
     }
 }
 
+/**
+ * @brief Mostra no terminal o pai de cada relay e quantos nós ficaram em cada salto.
+ * @param t Topologia já montada por MontarArvore().
+ */
 inline void ImprimirResumoArvore(const Topologia& t)
 {
     std::map<int, uint32_t> porSaltos;
@@ -292,6 +277,13 @@ inline void ImprimirResumoArvore(const Topologia& t)
     std::cout << " | sem cobertura: " << sem << std::endl;
 }
 
+/**
+ * @brief Grava a árvore montada, uma linha por STA (resultado_topologia.csv).
+ *
+ * Usado pelo analisar_saltos.py e pelas páginas.
+ * @param arquivo Caminho do CSV.
+ * @param t Topologia já montada por MontarArvore().
+ */
 inline void ExportarTopologiaCsv(const std::string& arquivo, const Topologia& t)
 {
     std::ofstream out(arquivo.c_str());

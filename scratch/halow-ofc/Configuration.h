@@ -146,11 +146,13 @@ struct Configuration {
 	//  "grid" (padrão): matriz a partir do gateway, Nsta definido por --Nsta (comportamento original).
 	//  "area": matriz que preenche uma área AreaSize x AreaSize com espaçamento gridSpacing;
 	//          gateway no canto inferior direito (AreaSize, 0); Nsta = pontos da matriz - 1.
+
 	string topology = "grid";
 	double areaSize = 200.0;
 	// Relays (só na topologia "area"), em posições fixas "x1,y1;x2,y2;..." (m); cada
 	// posição vira o nó da matriz mais próximo. Sem posições: numRelays=1 põe um
 	// relay no centro da área (teste da Krisna); numRelays=0 = só o gateway.
+
 	string relayPositions = "";
 	uint32_t numRelays = 0;
 	// Escolha do pai de cada nó (topologia "area"): enlace válido se LQI previsto
@@ -165,13 +167,11 @@ struct Configuration {
 	// com o padrão do ns-3: 400 pacotes e descarte após 500 ms na fila.
 	// false = o lado STA dos relays nunca dorme (o padrão do módulo é dormir como
 	// qualquer STA, o que faz a descida encontrar o relay dormindo)
+	
 	bool relayStaPowerSave = true;
 	// true = o RAW não restringe o lado STA dos relays (eles disputam o canal a
 	// qualquer momento; por padrão recebem o mesmo slot RAW de um sensor)
 	bool relayStaRawExempt = false;
-	// Diagnóstico: índice da STA cujo acesso ao canal (lado STA) é registrado
-	// em resultado_access_trace.csv (-1 = desligado)
-	int traceAccessNode = -1;
 	// Fila de dados do lado STA dos relays (subida de todos os nós abaixo dele).
 	// Por padrão herda os 10 pacotes de todo DeviceList/0, igual a um sensor.
 	uint32_t relayStaQueueMaxPackets = 10;
@@ -188,9 +188,6 @@ struct Configuration {
 	// STA só tenta associar se o beacon chegar com pelo menos esta potência (dBm).
 	// -1000 = desligado (comportamento original).
 	double minBeaconRssiForAssoc = -1000.0;
-
-	bool monitorRadioSamples = true;  // false: não exporta resultado_radio_rx_samples.csv
-	bool monitorPacketRecords = true; // false: não exporta resultado_ip_packet_events.csv
 
 	Configuration();
 	Configuration(int argc, char *argv[]);
